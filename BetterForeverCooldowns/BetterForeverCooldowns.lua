@@ -242,10 +242,11 @@ end
 
 local function isSpellReady(id)
     local charges = apiCall(C_Spell.GetSpellCharges, id)
-    if not readable(charges) then return false end
+    if not readable(charges) then return nil end
     if charges then
         local current = number(charges.currentCharges)
-        return current ~= nil and current > 0
+        if current ~= nil then return current > 0 end
+        return nil
     end
     local duration = apiCall(C_Spell.GetSpellCooldownDuration, id, true)
     if readable(duration) and (type(duration) == "table" or type(duration) == "userdata") then
@@ -264,7 +265,6 @@ local function isSpellReady(id)
             end
         end
     end
-    return false
 end
 
 local function setSpellTimerFromNumbers(cooldown, info, ignoreGCD)
@@ -393,7 +393,11 @@ local function createIcon(parent, onCooldownDone)
         else
             GameTooltip:SetSpellByID(self.entry.id)
         end
-        if self.missing:IsShown() then GameTooltip:AddLine("Missing buff", 1, 0.55, 0.3) end
+        if self.unknown then
+            GameTooltip:AddLine("Status unavailable", 0.8, 0.8, 0.8)
+        elseif self.missing:IsShown() then
+            GameTooltip:AddLine("Missing buff", 1, 0.55, 0.3)
+        end
         GameTooltip:Show()
     end)
     icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -422,20 +426,25 @@ local function visibleBuffs(viewer)
     return visible
 end
 
-local function isMissingBuff(id)
-    if activeAuras.HELPFUL[id] or not auraListComplete.HELPFUL then return false end
+local function isAuraMissing(id, filter)
+    if activeAuras[filter][id] then return false end
+    if not auraListComplete[filter] then return nil end
     if C_Secrets and C_Secrets.ShouldSpellAuraBeSecret then
-        return apiCall(C_Secrets.ShouldSpellAuraBeSecret, id) == false
+        local restricted = apiCall(C_Secrets.ShouldSpellAuraBeSecret, id)
+        if not readable(restricted) or restricted ~= false then return nil end
     end
     return true
 end
 
 local function missingForOverride(id, override)
-    if not isMissingBuff(id) then return false end
+    local missing = isAuraMissing(id, "HELPFUL")
+    if missing == false then return false end
     for alternative in pairs(override.alternatives or {}) do
-        if not isMissingBuff(alternative) then return false end
+        local absent = isAuraMissing(alternative, "HELPFUL")
+        if absent == false then return false end
+        if absent == nil then missing = nil end
     end
-    return true
+    return missing
 end
 
 function Addon.SetMissingReminder(id, auraID, enabled)
@@ -507,11 +516,14 @@ local function auraEntries(settings, visible)
         local aura = activeAuras[pin.filter][pin.id]
         local override = Addon.GetIconOverride("auras", pin.id, pin.filter)
         local missingOnly = pin.filter == "HELPFUL" and override and override.visibility == "missing"
-        local missing = missingOnly and missingForOverride(pin.id, override)
-        if (pin.filter == "HARMFUL" or not visible[pin.id]) and (missing or (aura and not missingOnly)) then
+        local missing
+        if missingOnly then missing = missingForOverride(pin.id, override) end
+        local unknown = InCombatLockdown()
+            and (missingOnly and missing == nil or not missingOnly and not aura and isAuraMissing(pin.id, pin.filter) == nil)
+        if (pin.filter == "HARMFUL" or not visible[pin.id]) and (missing or unknown or (aura and not missingOnly)) then
             entries[#entries + 1] = {
                 entry = Addon.GetEntryDetails("auras", pin.id),
-                override = override, aura = aura, missing = missing,
+                override = override, aura = aura, missing = missing, unknown = unknown,
             }
         end
     end
@@ -554,9 +566,11 @@ local function layoutAuras()
         icon:SetSize(settings.size, settings.size)
         icon.entry = item.entry
         icon.texture:SetTexture(item.entry.icon)
-        icon.texture:SetDesaturated(item.missing == true)
-        icon:SetAlpha(item.missing and 0.5 or 1)
-        icon.missing:SetShown(item.missing == true)
+        icon.unknown = item.unknown
+        icon.texture:SetDesaturated(item.missing == true or item.unknown == true)
+        icon:SetAlpha((item.missing or item.unknown) and 0.55 or 1)
+        icon.missing:SetText(item.unknown and "?" or "!")
+        icon.missing:SetShown(item.missing == true or item.unknown == true)
         applyTimerStyle(icon.cooldown, settings, item.override)
         updateAuraTimer(icon, settings, item.aura)
         icon:Show()
@@ -672,8 +686,27 @@ local function viewerOverride(item, key, id)
     return nativeOverride or Addon.GetIconOverride(key, id, filter)
 end
 
+local unknownLabels = setmetatable({}, { __mode = "k" })
+
+local function showUnknown(item, parent, unknown)
+    local label = unknownLabels[item]
+    if unknown and not label then
+        label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetText("?")
+        unknownLabels[item] = label
+    end
+    if label then
+        if unknown and (label:GetParent() ~= parent or label:GetNumPoints() == 0) then
+            label:SetParent(parent)
+            label:ClearAllPoints()
+            label:SetPoint("TOPLEFT", parent, "TOPLEFT", 2, -2)
+        end
+        label:SetShown(unknown)
+    end
+end
+
 local function updateNativeIcon(item, viewer, key)
-    local id = number(apiCall(item.GetSpellID, item))
+    local id = number(apiCall(item.GetSpellID, item)) or number(apiCall(item.GetBaseSpellID, item))
     local override = id and not viewer:IsEditing() and viewerOverride(item, key, id)
     local rank = override and spellsByID[override.rankID]
     local icon = rankIcons[item]
@@ -704,12 +737,17 @@ local function updateNativeIcon(item, viewer, key)
             local activeID = number(apiCall(item.GetAuraSpellID, item))
             if activeID and activeAuras.HELPFUL[activeID] then show = false end
         end
+        local unknown = show == nil and InCombatLockdown()
+        showUnknown(item, rank and icon or item, unknown)
         filteredItems[item] = true
-        item:SetShown(show)
-    elseif filteredItems[item] then
-        filteredItems[item] = nil
-        local shown = apiCall(item.ShouldBeShown, item)
-        if readable(shown) and type(shown) == "boolean" then item:SetShown(shown) end
+        item:SetShown(show == true or unknown == true)
+    else
+        showUnknown(item, item, false)
+        if filteredItems[item] then
+            filteredItems[item] = nil
+            local shown = apiCall(item.ShouldBeShown, item)
+            if readable(shown) and type(shown) == "boolean" then item:SetShown(shown) end
+        end
     end
 end
 
