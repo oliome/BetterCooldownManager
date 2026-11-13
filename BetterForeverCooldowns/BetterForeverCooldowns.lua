@@ -15,7 +15,7 @@ local viewerNames = {
 
 local defaults = {
     cooldowns = { overrides = {}, dividers = {} },
-    auras = { overrides = {}, selfAuras = {}, selfAuraOrder = {}, selfAuraPositions = {}, selfAuraTextures = {} },
+    auras = { overrides = {} },
     customCooldowns = { spells = {}, items = {} },
 }
 local function fillDefaults(values, source)
@@ -103,48 +103,18 @@ local function spellMetadata(id)
     return info and info.name or ("Spell " .. id), info and info.iconID or 134400
 end
 
-local function auraNameKey(name)
-    if readable(name) and type(name) == "string" then return name:lower() end
-end
-
-function Addon.ResolveTrackedAura(text)
-    local query = text:match("^%s*(.-)%s*$")
-    if query == "" then return end
-    if query:match("^%d+$") then return tonumber(query) end
-
-    local info = apiCall(C_Spell.GetSpellInfo, query)
-    return (readable(info) and info and auraNameKey(info.name) and info.name) or query
-end
-
-local function entryKeyLess(a, b)
-    if type(a) == type(b) then return a < b end
-    return type(a) == "number"
-end
-
 local function sortEntries(left, right)
     local a, b = left.name:lower(), right.name:lower()
     if a ~= b then return a < b end
     if left.level ~= right.level then return (left.level or 0) > (right.level or 0) end
-    return entryKeyLess(left.id, right.id)
-end
-
-function Addon.GetSelfAuraChoices()
-    local entries = {}
-    for id in pairs(db.auras.selfAuras) do
-        local name, icon = spellMetadata(id)
-        if type(id) == "string" then name = id end
-        entries[#entries + 1] = { id = id, name = name, icon = db.auras.selfAuraTextures[id] or icon }
-    end
-    table.sort(entries, sortEntries)
-    return entries
+    return left.id < right.id
 end
 
 -- Native layout indices belong to Blizzard. Custom entries sort between them.
-function Addon.PlaceSelfAuraFrames(native, custom, order, positions)
+function Addon.PlaceCustomCooldownFrames(native, custom, order, positions)
     table.sort(native, function(a, b) return a.layoutIndex < b.layoutIndex end)
     local slots, indices, ordered = {}, {}, {}
     for i, item in ipairs(native) do indices[number(item:GetCooldownID())] = i end
-    positions = positions or db.auras.selfAuraPositions
     local function place(id)
         local frame = custom[id]
         if not frame then return end
@@ -155,10 +125,10 @@ function Addon.PlaceSelfAuraFrames(native, custom, order, positions)
         slots[slot] = slots[slot] or {}
         table.insert(slots[slot], frame)
     end
-    for _, id in ipairs(order or db.auras.selfAuraOrder) do place(id) end
+    for _, id in ipairs(order) do place(id) end
     local remaining = {}
     for id in pairs(custom) do remaining[#remaining + 1] = id end
-    table.sort(remaining, entryKeyLess)
+    table.sort(remaining)
     for _, id in ipairs(remaining) do place(id) end
     local changed = false
     for i = 0, #native do
@@ -335,279 +305,12 @@ local function setDuration(cooldown, duration)
     return false
 end
 
-local selfAuraIcons = {}
-local selfAuraInstances = {}
-local selfAuraDisplay = {}
-local addedPlayerAuras = {}
-local updatedPlayerAuras = {}
-local function hideUnusedSelfAuraIcons(used)
-    local changed = false
-    for index = used + 1, #selfAuraIcons do
-        local icon = selfAuraIcons[index]
-        if icon:IsShown() then
-            icon.layoutIndex = nil
-            icon:Hide()
-            changed = true
-        end
-    end
-    return changed
-end
-
-local function hideSelfAuraIcons(viewer)
-    if hideUnusedSelfAuraIcons(0) then
-        viewer:GetItemContainerFrame().stride = viewer:GetStride()
-    end
-end
-
 local function findPlayerAura(id)
     local api = C_UnitAuras
     local aura = apiCall(api.GetUnitAuraBySpellID, "player", id)
     if readable(aura) and aura then return aura end
     aura = apiCall(api.GetPlayerAuraBySpellID, id)
     if readable(aura) and aura then return aura end
-end
-
-local function refreshSelfAuras()
-    local viewer = _G.BuffIconCooldownViewer
-    if not viewer or not viewer.itemFramePool then return end
-    local selected = db.auras.selfAuras
-    local active, seenInstances, resolvedIDs, resolvedNames = {}, {}, {}, {}
-    local helpfulInstances = {}
-    if next(selected) then
-        local ids = apiCall(C_UnitAuras.GetUnitAuraInstanceIDs, "player", "HELPFUL")
-        if readable(ids) and type(ids) == "table" then
-            for _, instance in ipairs(ids) do
-                instance = number(instance)
-                if instance then helpfulInstances[instance] = true end
-            end
-        end
-        local buffs = apiCall(C_UnitAuras.GetUnitAuras, "player", "HELPFUL")
-        if readable(buffs) and type(buffs) == "table" then
-            for _, aura in ipairs(buffs) do
-                if readable(aura) then
-                    local id = number(aura.spellId)
-                    local instance = number(aura.auraInstanceID)
-                    if instance then
-                        seenInstances[instance] = aura
-                        helpfulInstances[instance] = true
-                    end
-                    if id then resolvedIDs[id] = aura end
-                    local name = auraNameKey(aura.name)
-                    if name then resolvedNames[name] = aura end
-                end
-            end
-        end
-    end
-    for instance, aura in pairs(addedPlayerAuras) do
-        local id = number(aura.spellId)
-        if id and not resolvedIDs[id] then resolvedIDs[id] = aura end
-        local name = auraNameKey(aura.name)
-        if name and not resolvedNames[name] then resolvedNames[name] = aura end
-        if not seenInstances[instance] then seenInstances[instance] = aura end
-    end
-    local instances, displayIDs, display = {}, {}, {}
-    local textures = db.auras.selfAuraTextures
-    local texturesChanged = false
-    for id in pairs(selected) do
-        local byName = type(id) == "string"
-        local linkedID = not byName and number(apiCall(C_UnitAuras.GetCooldownAuraBySpellID, id)) or nil
-        local aura
-        if byName then
-            aura = resolvedNames[auraNameKey(id)]
-            if not aura then
-                local match = apiCall(C_UnitAuras.GetAuraDataBySpellName, "player", id, "HELPFUL")
-                if readable(match) then aura = match end
-            end
-        else
-            aura = resolvedIDs[id] or resolvedIDs[linkedID]
-            if not aura then
-                local match = findPlayerAura(id) or (linkedID and findPlayerAura(linkedID))
-                if match and readable(match.isHelpful) and match.isHelpful == true then aura = match end
-            end
-        end
-        local retainedInstance
-        local instance = (aura and number(aura.auraInstanceID)) or selfAuraInstances[id]
-        if instance and (not aura or updatedPlayerAuras[instance]) then
-            local latest = apiCall(C_UnitAuras.GetAuraDataByAuraInstanceID, "player", instance)
-            local previous = (readable(latest) and latest) or seenInstances[instance]
-            if readable(previous) and previous then
-                local spellID = previous.spellId
-                local same
-                if byName then
-                    same = not readable(previous.name) or previous.name == nil or auraNameKey(previous.name) == auraNameKey(id)
-                else
-                    same = not readable(spellID) or spellID == id or (linkedID and spellID == linkedID)
-                end
-                if (same or helpfulInstances[instance]) and (not readable(previous.isHelpful) or previous.isHelpful ~= false) then
-                    aura = previous
-                    retainedInstance = instance
-                end
-            elseif not aura and (helpfulInstances[instance] or updatedPlayerAuras[instance]) then
-                aura = {}
-                retainedInstance = instance
-            end
-        end
-        if aura then
-            local instanceID = number(aura.auraInstanceID) or retainedInstance
-            instances[id] = instanceID
-            active[id] = aura
-            local prior = selfAuraDisplay[id]
-            if prior and prior.instance ~= instanceID then prior = nil end
-            displayIDs[id] = number(aura.spellId) or (prior and prior.spellID) or linkedID or id
-            display[id] = {
-                instance = instanceID, spellID = displayIDs[id],
-                texture = number(aura.icon) or (prior and prior.texture),
-                expires = number(aura.expirationTime) or (prior and prior.expires),
-                duration = number(aura.duration) or (prior and prior.duration),
-                rate = number(aura.timeMod) or (prior and prior.rate),
-            }
-            local texture = display[id].texture
-            if texture and texture ~= 134400 and textures[id] ~= texture then
-                textures[id] = texture
-                texturesChanged = true
-            end
-        end
-    end
-    selfAuraInstances = instances
-    selfAuraDisplay = display
-    if texturesChanged and Addon.RefreshTrackedBuffIcons then Addon.RefreshTrackedBuffIcons(textures) end
-    if not viewer:IsShown() then
-        hideSelfAuraIcons(viewer)
-        return
-    end
-    local native, nativeInstances, nativeFrames = {}, {}, {}
-    for item in viewer.itemFramePool:EnumerateActive() do
-        if item.layoutIndex and number(item:GetCooldownID()) then
-            local id = number(apiCall(item.GetAuraSpellID, item))
-            if item:IsShown() then
-                if id then native[id] = true end
-                local instance = number(apiCall(item.GetAuraSpellInstanceID, item))
-                if instance then nativeInstances[instance] = true end
-            end
-            nativeFrames[#nativeFrames + 1] = item
-        end
-    end
-    local ids = {}
-    for id in pairs(active) do
-        if not native[displayIDs[id]] and not nativeInstances[instances[id]] then ids[#ids + 1] = id end
-    end
-    table.sort(ids, entryKeyLess)
-    local displayed, uniqueIDs = {}, {}
-    local container = viewer:GetItemContainerFrame()
-    local custom, changed = {}, false
-    for _, id in ipairs(ids) do
-        local identity = instances[id] and ("instance:" .. instances[id]) or displayIDs[id]
-        if not displayed[identity] then
-            displayed[identity] = true
-            uniqueIDs[#uniqueIDs + 1] = id
-        end
-    end
-    for index, id in ipairs(uniqueIDs) do
-        local aura = active[id]
-        local icon = selfAuraIcons[index]
-        if not icon then
-            icon = CreateFrame("Frame", nil, container)
-            icon:Hide()
-            icon:SetSize(40, 40)
-            icon.texture = icon:CreateTexture(nil, "ARTWORK")
-            icon.texture:SetAllPoints()
-            local mask = icon:CreateMaskTexture()
-            mask:SetAtlas("UI-HUD-CoolDownManager-Mask")
-            mask:SetAllPoints()
-            icon.texture:AddMaskTexture(mask)
-            icon.cooldown = CreateFrame("Cooldown", nil, icon)
-            icon.cooldown:SetAllPoints()
-            icon.cooldown:SetReverse(true)
-            icon.cooldown:SetDrawSwipe(true)
-            icon.cooldown:SetDrawBling(false)
-            icon.cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
-            icon.cooldown:SetSwipeColor(0, 0, 0, 0.7)
-            icon.cooldown:SetCountdownFont("GameFontHighlightOutline")
-            local overlay = CreateFrame("Frame", nil, icon.cooldown)
-            overlay:SetAllPoints()
-            icon.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-            icon.count:SetPoint("BOTTOMRIGHT", -2, 2)
-            selfAuraIcons[index] = icon
-        end
-        local scale = viewer.iconScale or 1
-        if icon:GetScale() ~= scale then
-            icon:SetScale(scale)
-            changed = true
-        end
-        custom[id] = icon
-        local appearance = display[id]
-        icon.texture:SetTexture(appearance.texture or C_Spell.GetSpellTexture(displayIDs[id]) or 134400)
-        icon.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
-        local instanceID = instances[id]
-        local text = instanceID and apiCall(C_UnitAuras.GetAuraApplicationDisplayCount, "player", instanceID, 2)
-        if not readable(text) or type(text) == "string" then
-            icon.count:SetText(text)
-        else
-            local stacks = number(aura.applications)
-            icon.count:SetText(stacks and stacks > 1 and stacks or "")
-        end
-        local duration = instanceID and apiCall(C_UnitAuras.GetAuraDuration, "player", instanceID)
-        if not setDuration(icon.cooldown, duration) then
-            local expires, total = appearance.expires, appearance.duration
-            if expires and expires > GetTime() and total and total > 0 then
-                icon.cooldown:SetCooldown(expires - total, total, appearance.rate or 1)
-            else
-                icon.cooldown:Clear()
-            end
-        end
-    end
-    local removed = hideUnusedSelfAuraIcons(#uniqueIDs)
-    local _, positioned = Addon.PlaceSelfAuraFrames(nativeFrames, custom)
-    if #selfAuraIcons > 0 then
-        local stride = viewer:GetStride() + #uniqueIDs
-        if container.stride ~= stride then
-            container.stride = stride
-            changed = true
-        end
-        if changed or positioned or removed then container:Layout() end
-    end
-end
-
-function Addon.SetSelfAura(id, enabled)
-    if type(id) == "string" then
-        if id == "" then return false end
-        local key = auraNameKey(id)
-        for saved in pairs(db.auras.selfAuras) do
-            if auraNameKey(saved) == key then id = saved break end
-        end
-    elseif type(id) ~= "number" or id < 1 or id % 1 ~= 0 or id > 2147483647
-        or (enabled and not C_Spell.GetSpellInfo(id)) then
-        return false
-    end
-    db.auras.selfAuras[id] = enabled and true or nil
-    if not enabled then
-        db.auras.selfAuraTextures[id] = nil
-        db.auras.selfAuraPositions[id] = nil
-        tDeleteItem(db.auras.selfAuraOrder, id)
-    end
-    refreshSelfAuras()
-    Addon.UpdateChoices()
-    return true
-end
-
-function Addon.MoveSelfAura(id, anchor, before, neighbor)
-    local order, positions = db.auras.selfAuraOrder, db.auras.selfAuraPositions
-    if not db.auras.selfAuras[id] or id == neighbor then return end
-    tDeleteItem(order, id)
-    if neighbor then
-        local position = positions[neighbor]
-        positions[id] = position and { anchor = position.anchor, before = position.before }
-        local index = tIndexOf(order, neighbor)
-        if not index then
-            order[#order + 1] = neighbor
-            index = #order
-        end
-        table.insert(order, before and index or index + 1, id)
-    else
-        positions[id] = { anchor = anchor, before = before }
-        order[#order + 1] = id
-    end
-    refreshSelfAuras()
 end
 
 local function isSpellReady(id)
@@ -785,7 +488,7 @@ local function refreshCustomCooldowns(viewer)
             changed = true
         end
     end
-    local _, positioned = Addon.PlaceSelfAuraFrames(native, custom, order, positions)
+    local _, positioned = Addon.PlaceCustomCooldownFrames(native, custom, order, positions)
     if changed or positioned then container:Layout() end
 end
 
@@ -1101,8 +804,6 @@ local function styleViewer(viewer, key)
     if key == "cooldowns" then
         refreshCustomCooldowns(viewer)
         refreshDividers(viewer)
-    else
-        refreshSelfAuras()
     end
 end
 
@@ -1128,7 +829,6 @@ local function styleBlizzardViewers()
                     hooksecurefunc(viewer, "RefreshData", refreshViewer)
                     hooksecurefunc(viewer, "SetTimerShown", refreshViewer)
                     hooksecurefunc(viewer, "SetIsEditing", refreshViewer)
-                    if key == "auras" then viewer:HookScript("OnHide", hideSelfAuraIcons) end
                     viewerHooks[viewer] = true
                 end
                 styleViewer(viewer, key)
@@ -1181,9 +881,6 @@ local function refresh()
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
-        refreshSelfAuras()
-        wipe(addedPlayerAuras)
-        wipe(updatedPlayerAuras)
     end
     if update.blizzard then
         styleBlizzardViewers()
@@ -1206,18 +903,14 @@ driver:RegisterEvent("SPELL_UPDATE_CHARGES")
 driver:RegisterEvent("PLAYER_REGEN_DISABLED")
 driver:RegisterEvent("PLAYER_REGEN_ENABLED")
 driver:RegisterUnitEvent("UNIT_AURA", "player")
-driver:SetScript("OnEvent", function(_, event, name, auraUpdate)
+driver:SetScript("OnEvent", function(_, event, name)
     if event == "ADDON_LOADED" and name == addonName then
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
         db = BetterForeverCooldownsDB
         fillDefaults(db, defaults)
         migrateBuffAlternatives()
         db.cooldowns = { overrides = db.cooldowns.overrides, dividers = db.cooldowns.dividers }
-        db.auras = {
-            overrides = db.auras.overrides, selfAuras = db.auras.selfAuras,
-            selfAuraOrder = db.auras.selfAuraOrder, selfAuraPositions = db.auras.selfAuraPositions,
-            selfAuraTextures = db.auras.selfAuraTextures,
-        }
+        db.auras = { overrides = db.auras.overrides }
         for id, override in pairs(db.cooldowns.overrides) do
             if type(override) == "table" and (override.rankID or override.visibility == "ready") then
                 db.cooldowns.overrides[id] = {
@@ -1252,43 +945,6 @@ driver:SetScript("OnEvent", function(_, event, name, auraUpdate)
     elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_EQUIPMENT_CHANGED" then
         pending.bags = true
     elseif event == "UNIT_AURA" then
-        if readable(auraUpdate) and type(auraUpdate) == "table" then
-            if readable(auraUpdate.isFullUpdate) and auraUpdate.isFullUpdate then
-                wipe(addedPlayerAuras)
-                wipe(updatedPlayerAuras)
-            end
-            local removed = auraUpdate.removedAuraInstanceIDs
-            if readable(removed) and type(removed) == "table" then
-                for _, instance in ipairs(removed) do
-                    instance = number(instance)
-                    if instance then
-                        addedPlayerAuras[instance] = nil
-                        updatedPlayerAuras[instance] = nil
-                        for id, trackedInstance in pairs(selfAuraInstances) do
-                            if trackedInstance == instance then
-                                selfAuraInstances[id], selfAuraDisplay[id] = nil, nil
-                            end
-                        end
-                    end
-                end
-            end
-            local updated = auraUpdate.updatedAuraInstanceIDs
-            if readable(updated) and type(updated) == "table" then
-                for _, instance in ipairs(updated) do
-                    instance = number(instance)
-                    if instance then updatedPlayerAuras[instance] = true end
-                end
-            end
-            local added = auraUpdate.addedAuras
-            if readable(added) and type(added) == "table" then
-                for _, aura in ipairs(added) do
-                    local instance = readable(aura) and number(aura.auraInstanceID)
-                    if instance and readable(aura.isHelpful) and aura.isHelpful == true then
-                        addedPlayerAuras[instance] = aura
-                    end
-                end
-            end
-        end
         pending.auras = true
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         pending.cooldowns, pending.auras = true, true
