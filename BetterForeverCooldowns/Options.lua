@@ -156,32 +156,57 @@ openPicker = function(reminderID, auraID)
     Addon.UpdateChoices()
 end
 
-local trackedDisplay
+local trackedDisplays = {}
 local customRows = {}
 local refreshTrackedEntries
 
-local function addTrackedAura(id)
+local function clearTrackedEntries()
+    for display in pairs(trackedDisplays) do display.Container.betterCDMOrder = nil end
+    wipe(trackedDisplays)
+    for _, rows in pairs(customRows) do
+        for _, row in ipairs(rows) do
+            row.layoutIndex = nil
+            row:Hide()
+        end
+    end
+end
+
+local function addTrackedEntry(id, section, target)
     if InCombatLockdown() or not id or id < 1 or id > 2147483647 or id % 1 ~= 0 then return false end
     local manager = CooldownViewerSettings
     local categories = Enum.CooldownViewerCategory
     local provider = manager:GetDataProvider()
-    for _, category in ipairs({ categories.TrackedBuff, categories.HiddenPassive }) do
+    if section == "items" then
+        if C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(id) end
+        Addon.SetCustomCooldown(id, true, section)
+        return true
+    end
+    local isAura = section == "auras"
+    local sources = isAura and { target, categories.HiddenPassive, categories.TrackedBar }
+        or { target, categories.HiddenActive, target == categories.Essential and categories.Utility or categories.Essential }
+    for _, category in ipairs(sources) do
         for _, cooldownID in ipairs(provider:GetOrderedCooldownIDsForCategory(category)) do
             local info = provider:GetCooldownInfoForID(cooldownID)
             if info and (info.spellID == id or info.overrideSpellID == id
                 or (info.linkedSpellIDs and tContains(info.linkedSpellIDs, id))) then
-                if category == categories.HiddenPassive then
-                    local status = provider:SetCooldownToCategory(cooldownID, categories.TrackedBuff)
+                if category ~= target then
+                    local status = provider:SetCooldownToCategory(cooldownID, target)
                     manager:CheckDisplayActionStatus(Enum.CooldownLayoutAction.ChangeCategory, status)
                     if status ~= Enum.CooldownLayoutStatus.Success then return false end
                 end
-                Addon.SetSelfAura(id, false)
+                if isAura then
+                    Addon.SetSelfAura(id, false)
+                else
+                    Addon.SetCustomCooldown(id, false, nil)
+                end
                 manager:RefreshLayout()
                 return true
             end
         end
     end
-    return Addon.SetSelfAura(id, true)
+    if isAura then return Addon.SetSelfAura(id, true) end
+    Addon.SetCustomCooldown(id, false, section)
+    return true
 end
 
 local function createTrackedRow(container)
@@ -197,17 +222,39 @@ local function createTrackedRow(container)
     row.border:SetPoint("BOTTOMRIGHT", 6, -5)
     row:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetSpellByID(self.auraID)
+        if self.isItem then
+            GameTooltip:SetItemByID(self.entryID)
+        else
+            GameTooltip:SetSpellByID(self.entryID)
+        end
         GameTooltip:AddLine("Drag to reorder. Right-click to remove.", 0.8, 0.8, 0.8)
+        if self.section == "items" then
+            GameTooltip:AddLine("Right-click to move to a cooldown bar.", 0.8, 0.8, 0.8)
+        end
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
     row:SetScript("OnClick", function(self)
-        local id = self.auraID
+        local id, section, isItem = self.entryID, self.section, self.isItem
         MenuUtil.CreateContextMenu(self, function(_, root)
             root:CreateTitle("Better CDM")
-            root:CreateButton("Remove from Tracked Buffs", function()
-                Addon.SetSelfAura(id, false)
+            if section ~= "auras" then
+                for _, destination in ipairs({ { "Essential", "essential" }, { "Utility", "utility" }, { "Items", "items" } }) do
+                    local label, target = destination[1], destination[2]
+                    if target ~= section and (isItem or target ~= "items") then
+                        root:CreateButton("Move to " .. label, function()
+                            Addon.SetCustomCooldown(id, isItem, target)
+                            refreshTrackedEntries()
+                        end)
+                    end
+                end
+            end
+            root:CreateButton("Remove", function()
+                if section == "auras" then
+                    Addon.SetSelfAura(id, false)
+                else
+                    Addon.SetCustomCooldown(id, isItem, nil)
+                end
                 refreshTrackedEntries()
             end)
         end)
@@ -241,18 +288,22 @@ local function createTrackedRow(container)
         end
         if nearest and nearest ~= self then
             local cx = nearest:GetCenter()
-            local neighbor = nearest.auraID
-            local anchor = not neighbor and nearest:GetCooldownID()
-            Addon.MoveSelfAura(self.auraID, anchor, x < cx, neighbor)
+            local neighbor = nearest.betterCDMEntryKey
+            local anchor = not neighbor and nearest:GetCooldownID() or nil
+            if self.section == "auras" then
+                Addon.MoveSelfAura(self.entryID, anchor, x < cx, neighbor)
+            else
+                Addon.MoveCustomCooldown(self.betterCDMEntryKey, self.section, anchor, x < cx, neighbor)
+            end
             refreshTrackedEntries()
         end
     end)
     return row
 end
 
-refreshTrackedEntries = function()
-    local display = trackedDisplay
-    if not display then return end
+local function refreshTrackedDisplay(display, section)
+    local rows = customRows[section] or {}
+    customRows[section] = rows
     local container = display.Container
     local native, custom = {}, {}
     local width, height = 48, 48
@@ -260,37 +311,54 @@ refreshTrackedEntries = function()
         width, height = item:GetSize(true)
         if item:GetCooldownID() then native[#native + 1] = item end
     end
-    local entries = Addon.GetSelfAuraChoices(true)
+    local entries, order, positions
+    if section == "auras" then
+        entries = Addon.GetSelfAuraChoices(true)
+    else
+        entries, order, positions = Addon.GetCustomCooldowns(section)
+    end
     local query = (CooldownViewerSettings:GetFilterText() or ""):lower()
     for i, entry in ipairs(entries) do
-        local row = customRows[i]
+        local row = rows[i]
         if not row then
             row = createTrackedRow(container)
             row:Hide()
-            customRows[i] = row
+            rows[i] = row
         end
         row:SetParent(container)
         row:SetSize(width, height)
-        row.auraID = entry.id
+        row.entryID, row.isItem, row.section = entry.id, entry.isItem, section
+        row.betterCDMEntryKey = entry.key or entry.id
         row.icon:SetTexture(entry.icon)
         local matches = (entry.name .. " " .. entry.id):lower():find(query, 1, true)
         row.icon:SetAlpha(matches and 1 or 0.3)
     end
-    for i = #entries + 1, #customRows do customRows[i]:Hide() end
-    for i, entry in ipairs(entries) do custom[entry.id] = customRows[i] end
-    container.betterCDMOrder = Addon.PlaceSelfAuraFrames(native, custom)
+    for i = #entries + 1, #rows do
+        rows[i].layoutIndex = nil
+        rows[i]:Hide()
+    end
+    for i, entry in ipairs(entries) do custom[entry.key or entry.id] = rows[i] end
+    container.betterCDMOrder = Addon.PlaceSelfAuraFrames(native, custom, order, positions)
     container:Layout()
     display:Layout()
 end
 
+refreshTrackedEntries = function()
+    for display, section in pairs(trackedDisplays) do refreshTrackedDisplay(display, section) end
+end
+
 local function attachTrackedControls(manager)
-    local previous = trackedDisplay
-    trackedDisplay = nil
+    local categories = Enum.CooldownViewerCategory
+    local sections = {
+        [categories.TrackedBuff] = "auras", [categories.Essential] = "essential",
+        [categories.Utility] = "utility", [categories.EquipSlotEssential] = "items",
+    }
     for display in manager.categoryPool:EnumerateActive() do
-        local tracked = display:GetCategoryObject():GetCategory() == Enum.CooldownViewerCategory.TrackedBuff
+        local category = display:GetCategoryObject():GetCategory()
+        local section = sections[category]
         local controls = display.betterCDMTrackedControls
-        if tracked then
-            trackedDisplay = display
+        if section then
+            trackedDisplays[display] = section
             if not controls then
                 controls = CreateFrame("Frame", nil, display.Header)
                 controls:SetSize(215, 22)
@@ -299,14 +367,26 @@ local function attachTrackedControls(manager)
                 display.betterCDMTrackedControls = controls
                 local input = CreateFrame("EditBox", nil, controls, "InputBoxTemplate")
                 input:SetAutoFocus(false)
-                input:SetNumeric(true)
-                input:SetMaxLetters(10)
-                input:SetSize(85, 22)
-                input:SetPoint("RIGHT", -128, 0)
+                input:SetMaxLetters(120)
+                input:SetSize(113, 22)
+                input:SetPoint("LEFT", 5, 0)
+                local hint = input:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+                hint:SetPoint("LEFT", 5, 0)
+                controls.hint = hint
+                input:SetScript("OnTextChanged", function(self) hint:SetShown(self:GetText() == "") end)
                 input:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
                 local function add()
-                    if not addTrackedAura(tonumber(input:GetText())) then
-                        UIErrorsFrame:AddMessage("Could not add that aura spell ID.", 1, 0.3, 0.3)
+                    local current = trackedDisplays[display]
+                    if not current then return end
+                    local query = input:GetText() or ""
+                    local id
+                    if current == "auras" then
+                        id = Addon.ResolveTrackedAura(query)
+                    else
+                        id = Addon.ResolveCooldownEntry(query, current == "items")
+                    end
+                    if not addTrackedEntry(id, current, display:GetCategoryObject():GetCategory()) then
+                        UIErrorsFrame:AddMessage("Could not add that name or ID.", 1, 0.3, 0.3)
                         return
                     end
                     input:SetText("")
@@ -314,9 +394,9 @@ local function attachTrackedControls(manager)
                     refreshTrackedEntries()
                 end
                 input:SetScript("OnEnterPressed", add)
-                local addButton = button(controls, "Add by ID", 84, add)
+                local addButton = button(controls, "Add", 59, add)
                 addButton:SetPoint("LEFT", input, "RIGHT", 7, 0)
-                local presets = button(controls, "+", 29, function(owner)
+                controls.presets = button(controls, "+", 29, function(owner)
                     MenuUtil.CreateContextMenu(owner, function(_, root)
                         root:CreateTitle("Class debuffs")
                         local entries, selected = Addon.GetSelfAuraChoices(false)
@@ -324,35 +404,28 @@ local function attachTrackedControls(manager)
                             if not selected[entry.id] then
                                 local id = entry.id
                                 root:CreateButton(entry.name, function()
-                                    addTrackedAura(id)
+                                    addTrackedEntry(id, "auras", categories.TrackedBuff)
                                     refreshTrackedEntries()
                                 end)
                             end
                         end
                     end)
                 end)
-                presets:SetPoint("LEFT", addButton, "RIGHT", 3, 0)
+                controls.presets:SetPoint("LEFT", addButton, "RIGHT", 3, 0)
                 hooksecurefunc(display, "RefreshLayout", function(self)
-                    if self == trackedDisplay then refreshTrackedEntries() end
-                end)
-                hooksecurefunc(display, "Init", function(self, category)
-                    if self == trackedDisplay and category:GetCategory() ~= Enum.CooldownViewerCategory.TrackedBuff then
-                        trackedDisplay = nil
-                        for _, row in ipairs(customRows) do row:Hide() end
-                    end
+                    local current = trackedDisplays[self]
+                    if current then refreshTrackedDisplay(self, current) end
                 end)
                 hooksecurefunc(display, "SetCollapsed", function(self, collapsed)
-                    if self == trackedDisplay and not collapsed then refreshTrackedEntries() end
+                    local current = trackedDisplays[self]
+                    if current and not collapsed then refreshTrackedDisplay(self, current) end
                 end)
             end
+            controls.hint:SetText(section == "items" and "Item name or ID" or "Spell name or ID")
+            controls.presets:SetShown(section == "auras")
+            refreshTrackedDisplay(display, section)
         end
-        if controls then controls:SetShown(tracked) end
-    end
-    if previous and previous ~= trackedDisplay then previous.Container.betterCDMOrder = nil end
-    if trackedDisplay then
-        refreshTrackedEntries()
-    else
-        for _, row in ipairs(customRows) do row:Hide() end
+        if controls then controls:SetShown(section ~= nil) end
     end
 end
 
@@ -417,9 +490,17 @@ function Addon.AttachOptions()
     if attached or not Menu or not Menu.ModifyMenu then return end
     attached = true
     Menu.ModifyMenu("MENU_COOLDOWN_SETTINGS_ITEM", itemMenu)
+    local itemData = CreateFrame("Frame")
+    itemData:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+    itemData:SetScript("OnEvent", function(_, _, _, success)
+        if success then refreshTrackedEntries() end
+    end)
     if CooldownViewerSettings and CooldownViewerSettings.categoryPool then
+        hooksecurefunc(CooldownViewerSettings, "ClearDisplayCategories", clearTrackedEntries)
         hooksecurefunc(CooldownViewerSettings, "RefreshLayout", attachTrackedControls)
         hooksecurefunc(CooldownViewerSettings, "ApplyFilter", refreshTrackedEntries)
+        CooldownViewerSettings:HookScript("OnHide", clearTrackedEntries)
+        CooldownViewerSettings:HookScript("OnShow", attachTrackedControls)
         attachTrackedControls(CooldownViewerSettings)
     end
 end

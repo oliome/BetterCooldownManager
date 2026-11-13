@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Better Forever Cooldowns
-## Notes: Customize Blizzard cooldowns and track buffs and debuffs by spell ID.
-## Version: 0.8.0
+## Notes: Add spells, items, buffs, and debuffs to Blizzard's Cooldown Manager.
+## Version: 0.9.0
 ## Dependencies: Blizzard_CooldownViewer
 ## SavedVariablesPerCharacter: BetterForeverCooldownsDB
 

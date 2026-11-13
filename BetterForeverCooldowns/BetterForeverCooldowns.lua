@@ -16,6 +16,7 @@ local viewerNames = {
 local defaults = {
     cooldowns = { overrides = {}, dividers = {} },
     auras = { overrides = {}, selfAuras = {}, discoveredDebuffs = {}, selfAuraOrder = {}, selfAuraPositions = {} },
+    customCooldowns = { spells = {}, items = {} },
 }
 local classDebuffs = {
     MAGE = { 400573, 41425 },
@@ -109,6 +110,21 @@ local function spellMetadata(id)
     return info and info.name or ("Spell " .. id), info and info.iconID or 134400
 end
 
+function Addon.ResolveTrackedAura(text)
+    local query = text:match("^%s*(.-)%s*$")
+    if query == "" then return end
+    if query:match("^%d+$") then return tonumber(query) end
+
+    local info = apiCall(C_Spell.GetSpellInfo, query)
+    local name = readable(info) and info and info.name or query
+    for _, filter in ipairs({ "HELPFUL", "HARMFUL" }) do
+        local aura = apiCall(C_UnitAuras.GetAuraDataBySpellName, "player", name, filter)
+        local id = readable(aura) and aura and number(aura.spellId)
+        if id then return id end
+    end
+    if readable(info) and info then return number(info.spellID) end
+end
+
 local function sortEntries(left, right)
     local a, b = left.name:lower(), right.name:lower()
     if a ~= b then return a < b end
@@ -137,11 +153,11 @@ function Addon.GetSelfAuraChoices(selectedOnly)
 end
 
 -- Native layout indices belong to Blizzard. Custom entries sort between them.
-function Addon.PlaceSelfAuraFrames(native, custom)
+function Addon.PlaceSelfAuraFrames(native, custom, order, positions)
     table.sort(native, function(a, b) return a.layoutIndex < b.layoutIndex end)
     local slots, indices, ordered = {}, {}, {}
-    for i, item in ipairs(native) do indices[item:GetCooldownID()] = i end
-    local positions = db.auras.selfAuraPositions
+    for i, item in ipairs(native) do indices[number(item:GetCooldownID())] = i end
+    positions = positions or db.auras.selfAuraPositions
     local function place(id)
         local frame = custom[id]
         if not frame then return end
@@ -152,7 +168,7 @@ function Addon.PlaceSelfAuraFrames(native, custom)
         slots[slot] = slots[slot] or {}
         table.insert(slots[slot], frame)
     end
-    for _, id in ipairs(db.auras.selfAuraOrder) do place(id) end
+    for _, id in ipairs(order or db.auras.selfAuraOrder) do place(id) end
     local remaining = {}
     for id in pairs(custom) do remaining[#remaining + 1] = id end
     table.sort(remaining)
@@ -173,6 +189,75 @@ function Addon.PlaceSelfAuraFrames(native, custom)
         end
     end
     return ordered, changed
+end
+
+function Addon.ResolveCooldownEntry(text, isItem)
+    local query = text:match("^%s*(.-)%s*$")
+    if query == "" then return end
+    local id = query:match("^%d+$") and tonumber(query)
+    if id and (id < 1 or id > 2147483647) then return end
+    if isItem then
+        return number(apiCall(C_Item.GetItemInfoInstant, id or query))
+    end
+    local info = apiCall(C_Spell.GetSpellInfo, id or query)
+    if readable(info) and info then return id or number(info.spellID) end
+end
+
+function Addon.GetCustomCooldowns(section)
+    local entries, order, positions = {}, {}, {}
+    for _, kind in ipairs({ "spells", "items" }) do
+        local isItem = kind == "items"
+        for id, entry in pairs(db.customCooldowns[kind]) do
+            if entry.section == section then
+                local name, icon
+                if isItem then
+                    name = apiCall(C_Item.GetItemNameByID, id) or ("Item " .. id)
+                    icon = apiCall(C_Item.GetItemIconByID, id) or 134400
+                else
+                    name, icon = spellMetadata(id)
+                end
+                local key = isItem and -id or id
+                entries[#entries + 1] = { id = id, key = key, isItem = isItem, name = name, icon = icon, order = entry.order or id }
+                positions[key] = entry.position
+            end
+        end
+    end
+    table.sort(entries, function(a, b) return a.order < b.order or (a.order == b.order and a.key < b.key) end)
+    for i, entry in ipairs(entries) do order[i] = entry.key end
+    return entries, order, positions
+end
+
+function Addon.SetCustomCooldown(id, isItem, section)
+    local saved = isItem and db.customCooldowns.items or db.customCooldowns.spells
+    local old = saved[id]
+    if section then
+        if not old or old.section ~= section then saved[id] = { section = section } end
+    else
+        saved[id] = nil
+    end
+    Addon.ApplySettings()
+end
+
+function Addon.MoveCustomCooldown(key, section, anchor, before, neighbor)
+    local function entry(id)
+        return id < 0 and db.customCooldowns.items[-id] or db.customCooldowns.spells[id]
+    end
+    local saved = entry(key)
+    if not saved or saved.section ~= section or key == neighbor then return end
+    local _, order = Addon.GetCustomCooldowns(section)
+    tDeleteItem(order, key)
+    local target = neighbor and entry(neighbor)
+    if target and target.section == section then
+        local position = target.position
+        saved.position = position and { anchor = position.anchor, before = position.before }
+        local index = tIndexOf(order, neighbor)
+        table.insert(order, before and index or index + 1, key)
+    else
+        saved.position = { anchor = anchor, before = before }
+        order[#order + 1] = key
+    end
+    for index, entryID in ipairs(order) do entry(entryID).order = index end
+    Addon.ApplySettings()
 end
 
 local function scanSpellbook()
@@ -264,6 +349,26 @@ end
 
 local selfAuraIcons = {}
 local selfAuraInstances = {}
+local selfDebuffInstances = {}
+
+local function hideUnusedSelfAuraIcons(used)
+    local changed = false
+    for index = used + 1, #selfAuraIcons do
+        local icon = selfAuraIcons[index]
+        if icon:IsShown() then
+            icon.layoutIndex = nil
+            icon:Hide()
+            changed = true
+        end
+    end
+    return changed
+end
+
+local function hideSelfAuraIcons(viewer)
+    if hideUnusedSelfAuraIcons(0) then
+        viewer:GetItemContainerFrame().stride = viewer:GetStride()
+    end
+end
 
 local function findPlayerAura(id)
     local api = C_UnitAuras
@@ -278,19 +383,27 @@ local function refreshSelfAuras()
     if not viewer or not viewer.itemFramePool then return end
     local selected, discovered = db.auras.selfAuras, db.auras.discoveredDebuffs
     local active, seenInstances, resolvedIDs = {}, {}, {}
+    local harmful, harmfulInstances = {}, {}
     local auras = apiCall(C_UnitAuras.GetUnitAuras, "player", "HARMFUL")
     if readable(auras) and type(auras) == "table" then
         for _, aura in ipairs(auras) do
             if readable(aura) then
+                harmful[aura] = true
                 local id = number(aura.spellId)
                 local instance = number(aura.auraInstanceID)
-                if instance then seenInstances[instance] = aura end
+                if instance then
+                    seenInstances[instance] = aura
+                    harmfulInstances[instance] = true
+                end
                 if id and readable(aura.sourceUnit) and aura.sourceUnit == "player" then discovered[id] = true end
                 if id then resolvedIDs[id] = aura end
             end
         end
     end
-    if not viewer:IsShown() then return end
+    if not viewer:IsShown() then
+        hideSelfAuraIcons(viewer)
+        return
+    end
     if next(selected) then
         local buffs = apiCall(C_UnitAuras.GetUnitAuras, "player", "HELPFUL")
         if readable(buffs) and type(buffs) == "table" then
@@ -304,7 +417,7 @@ local function refreshSelfAuras()
             end
         end
     end
-    local instances, displayIDs = {}, {}
+    local instances, displayIDs, debuffs = {}, {}, {}
     for id in pairs(selected) do
         local linkedID = number(apiCall(C_UnitAuras.GetCooldownAuraBySpellID, id))
         local aura = resolvedIDs[id] or findPlayerAura(id)
@@ -328,9 +441,17 @@ local function refreshSelfAuras()
             instances[id] = number(aura.auraInstanceID) or retainedInstance
             active[id] = aura
             displayIDs[id] = number(aura.spellId) or linkedID or id
+            local isHarmful = aura.isHarmful
+            debuffs[id] = harmful[aura] or harmfulInstances[instances[id]]
+                or (readable(isHarmful) and isHarmful == true)
+                or (instances[id] ~= nil and instances[id] == selfDebuffInstances[id])
         end
     end
     selfAuraInstances = instances
+    wipe(selfDebuffInstances)
+    for id, isDebuff in pairs(debuffs) do
+        if isDebuff then selfDebuffInstances[id] = instances[id] end
+    end
     local native, nativeFrames = {}, {}
     for item in viewer.itemFramePool:EnumerateActive() do
         if item.layoutIndex and number(item:GetCooldownID()) then
@@ -346,7 +467,8 @@ local function refreshSelfAuras()
     table.sort(ids)
     local displayed, uniqueIDs = {}, {}
     local container = viewer:GetItemContainerFrame()
-    local custom, changed = {}, false
+    local custom, debuffFrames, changed = {}, {}, false
+    local buffCount = 0
     for _, id in ipairs(ids) do
         local identity = displayIDs[id]
         if not displayed[identity] then
@@ -386,7 +508,16 @@ local function refreshSelfAuras()
             icon:SetScale(scale)
             changed = true
         end
-        custom[id] = icon
+        if debuffs[id] then
+            if not icon.ignoreInLayout then changed = true end
+            icon.ignoreInLayout = true
+            debuffFrames[id] = icon
+        else
+            if icon.ignoreInLayout then changed = true end
+            icon.ignoreInLayout = nil
+            custom[id] = icon
+            buffCount = buffCount + 1
+        end
         icon.texture:SetTexture(number(aura.icon) or C_Spell.GetSpellTexture(displayIDs[id]) or 134400)
         icon.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
         local instanceID = instances[id]
@@ -411,20 +542,21 @@ local function refreshSelfAuras()
             end
         end
     end
-    for index = #uniqueIDs + 1, #selfAuraIcons do
-        if selfAuraIcons[index]:IsShown() then
-            selfAuraIcons[index]:Hide()
-            changed = true
-        end
-    end
+    local removed = hideUnusedSelfAuraIcons(#uniqueIDs)
     local _, positioned = Addon.PlaceSelfAuraFrames(nativeFrames, custom)
     if #selfAuraIcons > 0 then
-        local stride = viewer:GetStride() + #uniqueIDs
+        local stride = viewer:GetStride() + buffCount
         if container.stride ~= stride then
             container.stride = stride
             changed = true
         end
-        if changed or positioned then container:Layout() end
+        if changed or positioned or removed then container:Layout() end
+    end
+    local row = Addon.PlaceSelfAuraFrames({}, debuffFrames)
+    local spacing = 40 + math.max(0, container.childXPadding or 0)
+    for index, icon in ipairs(row) do
+        icon:ClearAllPoints()
+        icon:SetPoint("TOP", container, "BOTTOM", (index - (#row + 1) / 2) * spacing, -4 / icon:GetScale())
     end
 end
 
@@ -549,6 +681,95 @@ local function updateSpellTimer(icon, id, slot, lowerRank)
     if not readable(info) or not info then info = apiCall(C_Spell.GetSpellCooldown, id) end
     if setSpellTimerFromNumbers(cooldown, info) then return true, true end
     return false
+end
+
+local customCooldownFrames = {}
+
+local function refreshCustomCooldowns(viewer)
+    local section = viewer == _G.EssentialCooldownViewer and "essential" or "utility"
+    local entries, order, positions = Addon.GetCustomCooldowns(section)
+    local frames = customCooldownFrames[viewer]
+    if #entries == 0 and not frames then return end
+    local container = viewer:GetItemContainerFrame()
+    frames = frames or {}
+    customCooldownFrames[viewer] = frames
+    local native, nativeSpells, custom = {}, {}, {}
+    for item in viewer.itemFramePool:EnumerateActive() do
+        if item.layoutIndex and number(item:GetCooldownID()) then
+            native[#native + 1] = item
+            local id = number(item:GetBaseSpellID())
+            if id then nativeSpells[id] = true end
+            id = number(item:GetSpellID())
+            if id then nativeSpells[id] = true end
+        end
+    end
+    local template = native[1]
+    local size = section == "essential" and 50 or 30
+    local width, height = size, size
+    if template then width, height = template:GetSize(true) end
+    local scale = viewer.iconScale or 1
+    local used, changed = 0, false
+    for _, entry in ipairs(entries) do
+        if entry.isItem or not nativeSpells[entry.id] then
+            used = used + 1
+            local frame = frames[used]
+            if not frame then
+                frame = CreateFrame("Frame", nil, container)
+                frame:Hide()
+                frame.texture = frame:CreateTexture(nil, "ARTWORK")
+                frame.texture:SetAllPoints()
+                local mask = frame:CreateMaskTexture()
+                mask:SetAtlas("UI-HUD-CoolDownManager-Mask")
+                mask:SetAllPoints()
+                frame.texture:AddMaskTexture(mask)
+                frame.cooldown = CreateFrame("Cooldown", nil, frame)
+                frame.cooldown:SetAllPoints()
+                frame.cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
+                frame.cooldown:SetSwipeColor(0, 0, 0, 0.7)
+                frame.cooldown:SetDrawBling(false)
+                frame.cooldown:SetDrawSwipe(true)
+                frame.cooldown:SetCountdownFont(section == "essential" and "GameFontHighlightHugeOutline" or "GameFontHighlightOutline")
+                local overlay = CreateFrame("Frame", nil, frame.cooldown)
+                overlay:SetAllPoints()
+                frame.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+                frame.count:SetPoint("BOTTOMRIGHT", -2, 2)
+                frames[used] = frame
+            end
+            if frame:GetWidth() ~= width or frame:GetHeight() ~= height or frame:GetScale() ~= scale then
+                frame:SetSize(width, height)
+                frame:SetScale(scale)
+                changed = true
+            end
+            frame.texture:SetTexture(entry.icon)
+            frame.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
+            local applied, grey
+            if entry.isItem then
+                local count = number(apiCall(C_Item.GetItemCount, entry.id, false))
+                local start, duration, enabled = C_Item.GetItemCooldown(entry.id)
+                start, duration = number(start), number(duration)
+                applied = readable(enabled) and (enabled == true or enabled == 1)
+                    and start and duration and start > 0 and duration > 0 and start + duration > GetTime()
+                if applied then frame.cooldown:SetCooldown(start, duration) end
+                grey = count == 0 or not not applied
+                frame.count:SetText(count and count > 1 and count or "")
+            else
+                local spell = spellsByID[entry.id]
+                applied, grey = updateSpellTimer(frame, entry.id, spell and spell.slot, spell and spell.lowerRank)
+            end
+            if not applied then frame.cooldown:Clear() end
+            frame.texture:SetDesaturated(readable(grey) and grey == true)
+            custom[entry.key] = frame
+        end
+    end
+    for index = used + 1, #frames do
+        if frames[index]:IsShown() then
+            frames[index].layoutIndex = nil
+            frames[index]:Hide()
+            changed = true
+        end
+    end
+    local _, positioned = Addon.PlaceSelfAuraFrames(native, custom, order, positions)
+    if changed or positioned then container:Layout() end
 end
 
 local function isAuraMissing(id)
@@ -774,13 +995,14 @@ local function refreshDividers(viewer)
             if not frame then
                 frame = CreateFrame("Frame", nil, container)
                 frame.ignoreInLayout = true
+                frame:SetFrameLevel(container:GetFrameLevel() + 5)
                 frame:Hide()
                 local shadow = frame:CreateTexture(nil, "ARTWORK")
                 shadow:SetPoint("CENTER")
-                shadow:SetColorTexture(0, 0, 0, 0.85)
+                shadow:SetColorTexture(0, 0, 0, 1)
                 local line = frame:CreateTexture(nil, "OVERLAY")
                 line:SetPoint("CENTER")
-                line:SetColorTexture(0.85, 0.85, 0.85, 0.85)
+                line:SetColorTexture(1, 1, 1, 1)
                 frame.shadow, frame.line = shadow, line
                 frames[used] = frame
             end
@@ -792,9 +1014,9 @@ local function refreshDividers(viewer)
             frame:SetSize(1, 1)
             frame:ClearAllPoints()
             frame:SetPoint("CENTER", item, side, horizontal and offset or 0, horizontal and 0 or offset)
-            local lineWidth, lineHeight = horizontal and 2 or width * 0.65, horizontal and height * 0.65 or 2
+            local lineWidth, lineHeight = horizontal and 3 or width * 0.8, horizontal and height * 0.8 or 3
             frame.line:SetSize(lineWidth, lineHeight)
-            frame.shadow:SetSize(lineWidth + 2, lineHeight + 2)
+            frame.shadow:SetSize(lineWidth + 3, lineHeight + 3)
 
             frame:Show()
         end
@@ -838,6 +1060,7 @@ local function styleViewer(viewer, key)
         if key == "cooldowns" then refreshManaGemIcon(item, "RefreshIconDesaturation") end
     end
     if key == "cooldowns" then
+        refreshCustomCooldowns(viewer)
         refreshDividers(viewer)
     else
         refreshSelfAuras()
@@ -851,6 +1074,7 @@ local function updateNativeIcons(key)
             for item in viewer.itemFramePool:EnumerateActive() do
                 updateNativeIcon(item, viewer, key)
             end
+            if key == "cooldowns" then refreshCustomCooldowns(viewer) end
         end
     end
 end
@@ -865,6 +1089,7 @@ local function styleBlizzardViewers()
                     hooksecurefunc(viewer, "RefreshData", refreshViewer)
                     hooksecurefunc(viewer, "SetTimerShown", refreshViewer)
                     hooksecurefunc(viewer, "SetIsEditing", refreshViewer)
+                    if key == "auras" then viewer:HookScript("OnHide", hideSelfAuraIcons) end
                     viewerHooks[viewer] = true
                 end
                 styleViewer(viewer, key)
@@ -912,7 +1137,7 @@ local function refresh()
     local update = pending
     pending = {}
     if update.catalog then scanSpellbook() end
-    if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
+    if update.catalog or update.cooldowns or update.bags then updateNativeIcons("cooldowns") end
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
@@ -931,6 +1156,8 @@ local driver = CreateFrame("Frame")
 driver:RegisterEvent("ADDON_LOADED")
 driver:RegisterEvent("PLAYER_LOGIN")
 driver:RegisterEvent("BAG_UPDATE_DELAYED")
+driver:RegisterEvent("BAG_UPDATE_COOLDOWN")
+driver:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 for event in pairs(catalogEvents) do driver:RegisterEvent(event) end
 driver:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 driver:RegisterEvent("SPELL_UPDATE_CHARGES")
@@ -980,7 +1207,7 @@ driver:SetScript("OnEvent", function(_, event, name)
         pending.blizzard = true
     elseif catalogEvents[event] then
         pending.catalog = true
-    elseif event == "BAG_UPDATE_DELAYED" then
+    elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_EQUIPMENT_CHANGED" then
         pending.bags = true
     elseif event == "UNIT_AURA" then
         pending.auras = true
