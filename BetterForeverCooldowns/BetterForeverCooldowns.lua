@@ -13,7 +13,16 @@ local viewerNames = {
     auras = { "BuffIconCooldownViewer" },
 }
 
-local defaults = { cooldowns = { overrides = {}, dividers = {} }, auras = { overrides = {} } }
+local defaults = {
+    cooldowns = { overrides = {}, dividers = {} },
+    auras = { overrides = {}, selfAuras = {}, discoveredDebuffs = {} },
+}
+local classDebuffs = {
+    MAGE = { 400573, 41425 },
+    PALADIN = { 25771 },
+    PRIEST = { 6788 },
+    SHAMAN = { 57724 },
+}
 
 local function fillDefaults(values, source)
     for key, value in pairs(source) do
@@ -107,6 +116,26 @@ local function sortEntries(left, right)
     return left.id < right.id
 end
 
+function Addon.GetSelfAuraChoices(selectedOnly)
+    local entries, seen = {}, {}
+    local function add(id)
+        if seen[id] then return end
+        seen[id] = true
+        local name, icon = spellMetadata(id)
+        entries[#entries + 1] = { id = id, name = name, icon = icon }
+    end
+    local _, class = UnitClass("player")
+    if not selectedOnly then
+        for _, id in ipairs(classDebuffs[class] or {}) do
+            if C_Spell.GetSpellInfo(id) then add(id) end
+        end
+        for id in pairs(db.auras.discoveredDebuffs) do add(id) end
+    end
+    for id in pairs(db.auras.selfAuras) do add(id) end
+    table.sort(entries, sortEntries)
+    return entries, db.auras.selfAuras
+end
+
 local function scanSpellbook()
     wipe(spells)
     wipe(spellsByID)
@@ -186,10 +215,110 @@ end
 
 local function setDuration(cooldown, duration)
     if readable(duration) and duration and cooldown.SetCooldownFromDurationObject then
+        local active = apiCall(duration.IsActive, duration)
+        if readable(active) and active == false then return false end
         local ok = pcall(cooldown.SetCooldownFromDurationObject, cooldown, duration, true)
-        return ok
+        return ok, active
     end
     return false
+end
+
+local selfAuraIcons = {}
+
+local function refreshSelfAuras()
+    local viewer = _G.BuffIconCooldownViewer
+    if not viewer or not viewer.itemFramePool then return end
+    local selected, discovered = db.auras.selfAuras, db.auras.discoveredDebuffs
+    local active = {}
+    local auras = apiCall(C_UnitAuras.GetUnitAuras, "player", "HARMFUL")
+    if readable(auras) and type(auras) == "table" then
+        for _, aura in ipairs(auras) do
+            local id = readable(aura) and number(aura.spellId)
+            if id then
+                if readable(aura.sourceUnit) and aura.sourceUnit == "player" then discovered[id] = true end
+                if selected[id] then active[id] = aura end
+            end
+        end
+    end
+    if not viewer:IsShown() then return end
+    if next(selected) then
+        local buffs = apiCall(C_UnitAuras.GetUnitAuras, "player", "HELPFUL")
+        if readable(buffs) and type(buffs) == "table" then
+            for _, aura in ipairs(buffs) do
+                local id = readable(aura) and number(aura.spellId)
+                if id and selected[id] then active[id] = aura end
+            end
+        end
+    end
+    for item in viewer.itemFramePool:EnumerateActive() do
+        local id = number(apiCall(item.GetAuraSpellID, item))
+        if id and item:IsShown() then active[id] = nil end
+    end
+    local ids = {}
+    for id in pairs(active) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local horizontal = viewer.isHorizontal
+    local size = 40 * (viewer.iconScale or 1)
+    for index, id in ipairs(ids) do
+        local aura = active[id]
+        local icon = selfAuraIcons[index]
+        if not icon then
+            icon = CreateFrame("Frame", nil, viewer)
+            icon.ignoreInLayout = true
+            icon.texture = icon:CreateTexture(nil, "ARTWORK")
+            icon.texture:SetAllPoints()
+            local mask = icon:CreateMaskTexture()
+            mask:SetAtlas("UI-HUD-CoolDownManager-Mask")
+            mask:SetAllPoints()
+            icon.texture:AddMaskTexture(mask)
+            icon.cooldown = CreateFrame("Cooldown", nil, icon)
+            icon.cooldown:SetAllPoints()
+            icon.cooldown:SetReverse(true)
+            icon.cooldown:SetDrawSwipe(true)
+            icon.cooldown:SetDrawBling(false)
+            icon.cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
+            icon.cooldown:SetSwipeColor(0, 0, 0, 0.7)
+            icon.cooldown:SetCountdownFont("GameFontHighlightOutline")
+            local overlay = CreateFrame("Frame", nil, icon.cooldown)
+            overlay:SetAllPoints()
+            icon.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+            icon.count:SetPoint("BOTTOMRIGHT", -2, 2)
+            selfAuraIcons[index] = icon
+        end
+        icon:SetSize(size, size)
+        icon:ClearAllPoints()
+        local offset = (index - (#ids + 1) / 2) * (size + 3)
+        if horizontal then
+            icon:SetPoint("TOP", viewer, "BOTTOM", offset, -3)
+        else
+            icon:SetPoint("LEFT", viewer, "RIGHT", 3, -offset)
+        end
+        icon.texture:SetTexture(number(aura.icon) or C_Spell.GetSpellTexture(id) or 134400)
+        local count = number(aura.applications)
+        icon.count:SetText(count and count > 1 and count or "")
+        icon.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
+        local instanceID = number(aura.auraInstanceID)
+        local duration = instanceID and apiCall(C_UnitAuras.GetAuraDuration, "player", instanceID)
+        if not setDuration(icon.cooldown, duration) then
+            local expires, total = number(aura.expirationTime), number(aura.duration)
+            if expires and expires > GetTime() and total and total > 0 then
+                icon.cooldown:SetCooldown(expires - total, total, number(aura.timeMod) or 1)
+            else
+                icon.cooldown:Clear()
+            end
+        end
+        icon:Show()
+    end
+    for index = #ids + 1, #selfAuraIcons do selfAuraIcons[index]:Hide() end
+end
+
+function Addon.SetSelfAura(id, enabled)
+    if type(id) ~= "number" or id < 1 or id % 1 ~= 0 or id > 2147483647 then return false end
+    if enabled and not C_Spell.GetSpellInfo(id) then return false end
+    db.auras.selfAuras[id] = enabled and true or nil
+    refreshSelfAuras()
+    Addon.UpdateChoices()
+    return true
 end
 
 local function isSpellReady(id)
@@ -222,7 +351,7 @@ end
 local function setSpellTimerFromNumbers(cooldown, info)
     if not readable(info) or not info then return false end
     local start, duration = number(info.startTime), number(info.duration)
-    if not start or start <= 0 or not duration or duration <= 0 then return false end
+    if not start or start <= 0 or not duration or duration <= 0 or start + duration <= GetTime() then return false end
     local gcd = apiCall(C_Spell.GetSpellCooldown, 61304)
     -- If the comparison is unavailable, avoid displaying a GCD-only timer.
     if not readable(gcd) or not gcd then return false end
@@ -234,51 +363,52 @@ local function setSpellTimerFromNumbers(cooldown, info)
     return true
 end
 
-local function updateSpellTimer(icon)
-    local spell = icon.entry
+local function updateSpellTimer(icon, id, slot, lowerRank)
     local book = C_SpellBook
     local bank = Enum.SpellBookSpellBank.Player
-    local id = spell.id
-    if not spell.lowerRank then
+    if not lowerRank then
         local overrideID = number(apiCall(C_Spell.GetOverrideSpell, id))
         if overrideID and overrideID > 0 then id = overrideID end
     end
     local charges
-    if spell.slot then charges = apiCall(book.GetSpellBookItemCharges, spell.slot, bank) end
+    if slot then charges = apiCall(book.GetSpellBookItemCharges, slot, bank) end
     if readable(charges) and not charges then charges = apiCall(C_Spell.GetSpellCharges, id) end
     local current, maximum
     if readable(charges) and charges then
         current = number(charges.currentCharges)
         maximum = number(charges.maxCharges)
     end
-    icon.count:SetText(current or "")
+    icon.count:SetText(maximum and maximum > 1 and current or "")
 
     local duration
-    local recharging = current and maximum and current < maximum
+    local recharging = current and maximum and current > 0 and current < maximum
     if recharging then
-        if spell.slot then duration = apiCall(book.GetSpellBookItemChargeDuration, spell.slot, bank) end
+        if slot then duration = apiCall(book.GetSpellBookItemChargeDuration, slot, bank) end
         if readable(duration) and not duration then duration = apiCall(C_Spell.GetSpellChargeDuration, id) end
     end
     local cooldown = icon.cooldown
-    if setDuration(cooldown, duration) then return end
+    if setDuration(cooldown, duration) then return true, false end
     if recharging then
         local start = number(charges.cooldownStartTime)
         local seconds = number(charges.cooldownDuration)
-        if start and start > 0 and seconds and seconds > 0 then
+        if start and start > 0 and seconds and seconds > 0 and start + seconds > GetTime() then
             cooldown:SetCooldown(start, seconds, number(charges.chargeModRate) or 1)
-            return
+            return true, false
         end
     end
-    if spell.slot then
-        duration = apiCall(book.GetSpellBookItemCooldownDuration, spell.slot, bank, true)
-        if setDuration(cooldown, duration) then return end
+    if slot then
+        duration = apiCall(book.GetSpellBookItemCooldownDuration, slot, bank, true)
+        local applied, active = setDuration(cooldown, duration)
+        if applied then return true, active end
     end
     duration = apiCall(C_Spell.GetSpellCooldownDuration, id, true)
-    if setDuration(cooldown, duration) then return end
+    local applied, active = setDuration(cooldown, duration)
+    if applied then return true, active end
     local info
-    if spell.slot then info = apiCall(book.GetSpellBookItemCooldown, spell.slot, bank) end
+    if slot then info = apiCall(book.GetSpellBookItemCooldown, slot, bank) end
     if not readable(info) or not info then info = apiCall(C_Spell.GetSpellCooldown, id) end
-    if not setSpellTimerFromNumbers(cooldown, info) then cooldown:Clear() end
+    if setSpellTimerFromNumbers(cooldown, info) then return true, true end
+    return false
 end
 
 local function isAuraMissing(id)
@@ -367,14 +497,35 @@ local viewerHooks, itemHooks = {}, {}
 local spellTimers = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
+local function restoreNativeTimer(timer, item)
+    timer.frame:Hide()
+    if timer.nativeCooldown then
+        timer.nativeCooldown:SetAlpha(timer.cooldownAlpha)
+        if timer.chargeFrame then timer.chargeFrame:SetAlpha(timer.chargeAlpha) end
+        timer.nativeCooldown, timer.chargeFrame = nil, nil
+    end
+    if timer.nativeDesaturated ~= nil then
+        local icon = item:GetIconTexture()
+        local desaturated = apiCall(icon.IsDesaturated, icon)
+        if readable(desaturated) and desaturated == timer.desaturated then
+            icon:SetDesaturated(timer.nativeDesaturated)
+        end
+    end
+    timer.nativeDesaturated, timer.desaturated = nil, nil
+end
+
 local function updateNativeIcon(item, viewer, key)
     local baseID = number(apiCall(item.GetBaseSpellID, item))
     local id = number(apiCall(item.GetSpellID, item)) or baseID
     local override = id and not viewer:IsEditing() and (Addon.GetIconOverride(key, baseID or id) or Addon.GetIconOverride(key, id))
     local rank = override and spellsByID[override.rankID]
     local timer = spellTimers[item]
-    local nativeCooldown = rank and item:GetCooldownFrame()
-    if nativeCooldown then
+    local nativeCooldown = key == "cooldowns" and id and not viewer:IsEditing() and item:GetCooldownFrame()
+    -- Fill in a missing native combat timer without replacing a countdown Blizzard is already displaying.
+    local fallback = nativeCooldown and not rank and InCombatLockdown()
+        and number(apiCall(nativeCooldown.GetCooldownDuration, nativeCooldown)) == 0
+    if timer and timer.nativeCooldown and not rank then restoreNativeTimer(timer, item) end
+    if nativeCooldown and (rank or fallback) then
         if not timer then
             local frame = CreateFrame("Frame", nil, item)
             frame:SetAllPoints(item)
@@ -382,40 +533,55 @@ local function updateNativeIcon(item, viewer, key)
             local cooldown = CreateFrame("Cooldown", nil, frame)
             cooldown:SetAllPoints(nativeCooldown)
             cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
+            cooldown:SetSwipeColor(CooldownViewerConstants.ITEM_COOLDOWN_COLOR:GetRGBA())
             cooldown:SetDrawBling(false)
             cooldown:SetDrawEdge(false)
+            cooldown:SetDrawSwipe(true)
             cooldown:SetCountdownFont(item.cooldownFont or "GameFontHighlightOutline")
-            cooldown:SetScript("OnCooldownDone", function() updateNativeIcon(item, viewer, key) end)
             local countFrame = CreateFrame("Frame", nil, frame)
             countFrame:SetAllPoints(item)
             countFrame:SetFrameLevel(cooldown:GetFrameLevel() + 1)
             local font = viewer == _G.EssentialCooldownViewer and "NumberFontNormal" or "NumberFontNormalSmall"
             local count = countFrame:CreateFontString(nil, "OVERLAY", font)
             count:SetPoint("BOTTOMRIGHT", -2, 2)
-            timer = { frame = frame, cooldown = cooldown, count = count }
+            timer = { frame = frame, cooldown = cooldown, count = count, countFrame = countFrame }
+            cooldown:SetScript("OnCooldownDone", function() restoreNativeTimer(timer, item) end)
             spellTimers[item] = timer
         end
-        if not timer.nativeCooldown then
-            timer.nativeCooldown = nativeCooldown
-            timer.cooldownAlpha = nativeCooldown:GetAlpha()
-            nativeCooldown:SetAlpha(0)
-            local chargeFrame = item:GetChargeCountFrame()
-            if chargeFrame then
-                timer.chargeFrame = chargeFrame
-                timer.chargeAlpha = chargeFrame:GetAlpha()
-                chargeFrame:SetAlpha(0)
+        timer.cooldown:SetHideCountdownNumbers(nativeCooldown:GetHideCountdownNumbers())
+        timer.cooldown:SetCountdownFormatter(nativeCooldown:GetCountdownFormatter())
+        timer.cooldown:SetCountdownAbbrevThreshold(nativeCooldown:GetCountdownAbbrevThreshold())
+        timer.cooldown:SetCountdownMillisecondsThreshold(nativeCooldown:GetCountdownMillisecondsThreshold())
+        timer.cooldown:SetMinimumCountdownDuration(nativeCooldown:GetMinimumCountdownDuration())
+        local applied, desaturated = updateSpellTimer(timer, rank and rank.id or id, rank and rank.slot, rank and rank.lowerRank)
+        if applied then
+            if rank and not timer.nativeCooldown then
+                timer.nativeCooldown = nativeCooldown
+                timer.cooldownAlpha = nativeCooldown:GetAlpha()
+                nativeCooldown:SetAlpha(0)
+                local chargeFrame = item:GetChargeCountFrame()
+                if chargeFrame then
+                    timer.chargeFrame = chargeFrame
+                    timer.chargeAlpha = chargeFrame:GetAlpha()
+                    chargeFrame:SetAlpha(0)
+                end
             end
+            timer.countFrame:SetShown(not not rank)
+            if readable(desaturated) and type(desaturated) == "boolean" then
+                local icon = item:GetIconTexture()
+                local nativeDesaturated = apiCall(icon.IsDesaturated, icon)
+                if readable(nativeDesaturated) and type(nativeDesaturated) == "boolean" then
+                    if nativeDesaturated ~= timer.desaturated then timer.nativeDesaturated = nativeDesaturated end
+                    icon:SetDesaturated(desaturated)
+                    timer.desaturated = desaturated
+                end
+            end
+            timer.frame:Show()
+        else
+            restoreNativeTimer(timer, item)
         end
-        timer.entry = rank
-        timer.cooldown:SetHideCountdownNumbers(not viewer.timerShown)
-        timer.cooldown:SetDrawSwipe(true)
-        updateSpellTimer(timer)
-        timer.frame:Show()
-    elseif timer and timer.nativeCooldown then
-        timer.frame:Hide()
-        timer.nativeCooldown:SetAlpha(timer.cooldownAlpha)
-        if timer.chargeFrame then timer.chargeFrame:SetAlpha(timer.chargeAlpha) end
-        timer.nativeCooldown, timer.chargeFrame = nil, nil
+    elseif timer and timer.frame:IsShown() then
+        restoreNativeTimer(timer, item)
     end
 
     local mode = override and override.visibility
@@ -444,27 +610,30 @@ local function refreshDividers(viewer)
     local frames = dividerFrames[viewer]
     if not frames and not next(selected) then return end
 
-    local anchors, lastIndex = {}, 0
+    local items = {}
     for item in viewer.itemFramePool:EnumerateActive() do
         local id = number(item:GetCooldownID())
         if id and item.layoutIndex then
-            lastIndex = math.max(lastIndex, item.layoutIndex)
-            if selected[id] then anchors[item.layoutIndex] = item end
+            items[item.layoutIndex] = item
         end
     end
 
     local container = viewer:GetItemContainerFrame()
     local horizontal = container.isHorizontal
+    local forward = (horizontal and container.layoutFramesGoingRight) or (not horizontal and container.layoutFramesGoingUp)
+    local stride = container.stride or 1
+    local padding = (horizontal and container.childXPadding or container.childYPadding) or 0
+    local side = horizontal and (forward and "RIGHT" or "LEFT") or (forward and "TOP" or "BOTTOM")
     frames = frames or {}
     dividerFrames[viewer] = frames
-    local used, changed = 0, false
-    for index = 1, lastIndex - 1 do
-        local item = anchors[index]
-        if item then
+    local used = 0
+    for index, item in pairs(items) do
+        if items[index + 1] and index % stride ~= 0 and selected[number(item:GetCooldownID())] then
             used = used + 1
             local frame = frames[used]
             if not frame then
                 frame = CreateFrame("Frame", nil, container)
+                frame.ignoreInLayout = true
                 frame:Hide()
                 local shadow = frame:CreateTexture(nil, "ARTWORK")
                 shadow:SetPoint("CENTER")
@@ -478,33 +647,22 @@ local function refreshDividers(viewer)
 
             local width, height = item:GetSize(true)
             local scale = item:GetScale()
-            local slotWidth, slotHeight = horizontal and 22 or width, horizontal and height or 22
-            if frame:GetWidth() ~= slotWidth or frame:GetHeight() ~= slotHeight or frame:GetScale() ~= scale then
-                frame:SetSize(slotWidth, slotHeight)
-                frame:SetScale(scale)
-                changed = true
-            end
+            local offset = (forward and 1 or -1) * padding / (2 * scale)
+            frame:SetScale(scale)
+            frame:SetSize(1, 1)
+            frame:ClearAllPoints()
+            frame:SetPoint("CENTER", item, side, horizontal and offset or 0, horizontal and 0 or offset)
             local lineWidth, lineHeight = horizontal and 2 or width * 0.65, horizontal and height * 0.65 or 2
             frame.line:SetSize(lineWidth, lineHeight)
             frame.shadow:SetSize(lineWidth + 2, lineHeight + 2)
 
-            -- Native item indices are used to look up cooldown IDs. Leave them intact.
-            local layoutIndex = index + 0.5
-            if frame.layoutIndex ~= layoutIndex or not frame:IsShown() then
-                frame.layoutIndex = layoutIndex
-                frame:Show()
-                changed = true
-            end
+            frame:Show()
         end
     end
 
     for index = used + 1, #frames do
-        if frames[index]:IsShown() then
-            frames[index]:Hide()
-            changed = true
-        end
+        frames[index]:Hide()
     end
-    if changed then container:Layout() end
 end
 
 function Addon.HasDivider(id)
@@ -529,7 +687,7 @@ local function styleViewer(viewer, key)
                 end)
             end
             local cooldown = item:GetCooldownFrame()
-            if cooldown then
+            if cooldown and key == "cooldowns" then
                 cooldown:HookScript("OnCooldownDone", function()
                     updateNativeIcon(item, viewer, key)
                 end)
@@ -539,7 +697,11 @@ local function styleViewer(viewer, key)
         updateNativeIcon(item, viewer, key)
         if key == "cooldowns" then refreshManaGemIcon(item, "RefreshIconDesaturation") end
     end
-    if key == "cooldowns" then refreshDividers(viewer) end
+    if key == "cooldowns" then
+        refreshDividers(viewer)
+    else
+        refreshSelfAuras()
+    end
 end
 
 local function updateNativeIcons(key)
@@ -614,6 +776,7 @@ local function refresh()
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
+        refreshSelfAuras()
     end
     if update.blizzard then
         styleBlizzardViewers()
@@ -641,7 +804,10 @@ driver:SetScript("OnEvent", function(_, event, name)
         fillDefaults(db, defaults)
         migrateBuffAlternatives()
         db.cooldowns = { overrides = db.cooldowns.overrides, dividers = db.cooldowns.dividers }
-        db.auras = { overrides = db.auras.overrides }
+        db.auras = {
+            overrides = db.auras.overrides, selfAuras = db.auras.selfAuras,
+            discoveredDebuffs = db.auras.discoveredDebuffs,
+        }
         for id, override in pairs(db.cooldowns.overrides) do
             if type(override) == "table" and (override.rankID or override.visibility == "ready") then
                 db.cooldowns.overrides[id] = {

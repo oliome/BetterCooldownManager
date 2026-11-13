@@ -28,14 +28,20 @@ end
 function Addon.UpdateChoices()
     if not picker or not picker:IsVisible() then return end
     local query = picker.search:GetText():lower():match("^%s*(.-)%s*$")
-    local entries = Addon.GetBuffAlternatives(picker.reminderID, picker.auraID, picker.selectedOnly)
-    local override = Addon.GetIconOverride("auras", picker.reminderID)
-    local alternatives = override and override.alternatives or {}
+    local entries, selected
+    if picker.selfAuras then
+        entries, selected = Addon.GetSelfAuraChoices(picker.selectedOnly)
+    else
+        entries = Addon.GetBuffAlternatives(picker.reminderID, picker.auraID, picker.selectedOnly)
+        local override = Addon.GetIconOverride("auras", picker.reminderID)
+        selected = override and override.alternatives or {}
+    end
     local matches = {}
     for _, entry in ipairs(entries) do
         local name = entry.name
         if (name .. " " .. entry.id):lower():find(query, 1, true) then
-            matches[#matches + 1] = { id = entry.id, icon = entry.icon, text = name }
+            local label = picker.selfAuras and ("%s (%d)"):format(name, entry.id) or name
+            matches[#matches + 1] = { id = entry.id, icon = entry.icon, text = label }
         end
     end
     local pages = math.max(1, math.ceil(#matches / pageSize))
@@ -47,10 +53,10 @@ function Addon.UpdateChoices()
         if entry then
             row.icon:SetTexture(entry.icon)
             row.label:SetText(entry.text)
-            row.mark:SetText(alternatives[entry.id] and "✓" or "")
+            row.mark:SetText(selected[entry.id] and "✓" or "")
         end
     end
-    picker.empty:SetText(not picker.selectedOnly and "No matching buffs in Not Displayed" or "No matching entries")
+    picker.empty:SetText(not picker.selfAuras and not picker.selectedOnly and "No matching buffs in Not Displayed" or "No matching entries")
     picker.empty:SetShown(#matches == 0)
     picker.pageText:SetText(("%d / %d"):format(picker.page, pages))
     picker.previous:SetEnabled(picker.page > 1)
@@ -85,7 +91,7 @@ local function makePicker(manager)
     picker.mode = button(picker, "Selected", 90, function(self)
         picker.selectedOnly = not picker.selectedOnly
         picker.page = 1
-        self:SetText(picker.selectedOnly and "Not Displayed" or "Selected")
+        self:SetText(picker.selectedOnly and (picker.selfAuras and "Class debuffs" or "Not Displayed") or "Selected")
         Addon.UpdateChoices()
     end)
     picker.mode:SetPoint("TOPRIGHT", -14, -32)
@@ -110,6 +116,11 @@ local function makePicker(manager)
         row:SetScript("OnClick", function(self)
             if not self.entry then return end
             local id = self.entry.id
+            if picker.selfAuras then
+                local _, selected = Addon.GetSelfAuraChoices(true)
+                Addon.SetSelfAura(id, not selected[id])
+                return
+            end
             local override = Addon.GetIconOverride("auras", picker.reminderID)
             local selected = override and override.alternatives and override.alternatives[id]
             Addon.SetBuffAlternative(picker.reminderID, picker.auraID, id, not selected)
@@ -141,19 +152,60 @@ local function makePicker(manager)
     local hint = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     hint:SetPoint("BOTTOMLEFT", 16, 12)
     picker.hint = hint
+
+    local function addSpellID()
+        local id = tonumber(picker.spellID:GetText())
+        if not Addon.SetSelfAura(id, true) then
+            picker.hint:SetText("Enter a valid aura spell ID.")
+            return
+        end
+        picker.spellID:SetText("")
+        picker.spellID:ClearFocus()
+        picker.search:SetText("")
+        picker.hint:SetText("Added. Shows while the aura is active on you.")
+    end
+    picker.spellID = CreateFrame("EditBox", nil, picker, "InputBoxTemplate")
+    picker.spellID:SetAutoFocus(false)
+    picker.spellID:SetNumeric(true)
+    picker.spellID:SetMaxLetters(10)
+    picker.spellID:SetSize(101, 22)
+    picker.spellID:SetPoint("BOTTOMLEFT", 20, 29)
+    picker.spellID:SetScript("OnEnterPressed", addSpellID)
+    picker.spellID:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    picker.addID = button(picker, "Add by ID", 91, addSpellID)
+    picker.addID:SetPoint("LEFT", picker.spellID, "RIGHT", 7, 0)
 end
 
 openPicker = function(reminderID, auraID)
     if not CooldownViewerSettings:IsVisible() then return end
     if not picker then makePicker(CooldownViewerSettings) end
+    picker.selfAuras = reminderID == nil
     picker.reminderID, picker.auraID = reminderID, auraID
     picker.selectedOnly, picker.page = false, 1
     picker.mode:SetText("Selected")
-    picker.TitleText:SetText("Alternative buffs")
-    picker.hint:SetText("Pick a buff from Not Displayed to suppress this reminder.")
+    picker.TitleText:SetText(picker.selfAuras and "Tracked self auras" or "Alternative buffs")
+    picker.hint:SetText(picker.selfAuras and "Choose a class debuff or enter a buff or debuff ID."
+        or "Pick a buff from Not Displayed to suppress this reminder.")
+    picker.spellID:SetShown(picker.selfAuras)
+    picker.addID:SetShown(picker.selfAuras)
+    picker.spellID:SetText("")
     picker.search:SetText("")
     picker:Show()
     Addon.UpdateChoices()
+end
+
+local function attachSelfAuraButton(manager)
+    for display in manager.categoryPool:EnumerateActive() do
+        local tracked = display:GetCategoryObject():GetCategory() == Enum.CooldownViewerCategory.TrackedBuff
+        local control = display.betterCDMSelfAuras
+        if tracked and not control then
+            control = button(display.Header, "Self Auras", 90, function() openPicker() end)
+            control:SetPoint("RIGHT", display.Header, "RIGHT", -32, 0)
+            control.ignoreInLayout = true
+            display.betterCDMSelfAuras = control
+        end
+        if control then control:SetShown(tracked) end
+    end
 end
 
 local function itemMenu(owner, root)
@@ -217,6 +269,10 @@ function Addon.AttachOptions()
     if attached or not Menu or not Menu.ModifyMenu then return end
     attached = true
     Menu.ModifyMenu("MENU_COOLDOWN_SETTINGS_ITEM", itemMenu)
+    if CooldownViewerSettings and CooldownViewerSettings.categoryPool then
+        hooksecurefunc(CooldownViewerSettings, "RefreshLayout", attachSelfAuraButton)
+        attachSelfAuraButton(CooldownViewerSettings)
+    end
 end
 
 function Addon.ShowOptions()
