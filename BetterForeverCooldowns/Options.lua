@@ -1,5 +1,6 @@
 local _, Addon = ...
 local picker
+local openPicker
 local attached
 local pageSize = 8
 
@@ -69,20 +70,11 @@ local function missingToggle(menu, id, auraID)
         return override and override.visibility == "missing"
     end
     menu:CreateCheckbox("Show only when missing", checked, function()
-        local mode = not checked() and "missing" or nil
-        Addon.SetIconOverride("auras", id, "HELPFUL", "alternatives", nil)
-        if mode then Addon.SetIconOverride("auras", id, "HELPFUL", "auraID", auraID) end
-        Addon.SetIconOverride("auras", id, "HELPFUL", "visibility", mode)
+        Addon.SetMissingReminder(id, auraID, not checked())
     end)
-    if Addon.IsMageArmor(auraID) then
-        local function armorChecked()
-            local override = Addon.GetIconOverride("auras", id, "HELPFUL")
-            return override and override.alternatives == true and override.visibility == "missing"
-        end
-        menu:CreateCheckbox("Show only when no Mage armor is active", armorChecked, function()
-            Addon.SetArmorReminder(id, auraID, not armorChecked())
-        end)
-    end
+    menu:CreateButton("Choose alternative buffs…", function()
+        openPicker("alternatives", "HELPFUL", id, auraID)
+    end)
 end
 
 local function iconMenu(menu, section, id, filter)
@@ -113,14 +105,18 @@ end
 function Addon.UpdateChoices()
     if not picker or not picker:IsVisible() then return end
     local section, filter = picker.section, picker.filter
-    local settings = Addon.GetSettings(section)
+    local settings = Addon.GetSettings(section == "range" and "cooldowns" or "auras")
     local query = picker.search:GetText():lower():match("^%s*(.-)%s*$")
     local entries = {}
+    local alternatives
     if section == "range" then
-        settings = Addon.GetSettings("cooldowns")
         for _, spell in ipairs(Addon.GetRangeChoices()) do
             if not picker.trackedOnly or settings.rangeSpells[spell.id] then entries[#entries + 1] = spell end
         end
+    elseif section == "alternatives" then
+        entries = Addon.GetBuffAlternatives(picker.reminderID, picker.auraID, picker.trackedOnly)
+        local override = Addon.GetIconOverride("auras", picker.reminderID, "HELPFUL")
+        alternatives = override and override.alternatives or {}
     elseif picker.trackedOnly then
         for _, pin in ipairs(settings.entries) do
             if pin.filter == filter then entries[#entries + 1] = Addon.GetEntryDetails(section, pin.id) end
@@ -146,7 +142,14 @@ function Addon.UpdateChoices()
         if entry then
             row.icon:SetTexture(entry.icon)
             row.label:SetText(entry.text)
-            local tracked = section == "range" and settings.rangeSpells[entry.id] or Addon.FindPin(section, entry.id, filter)
+            local tracked
+            if section == "range" then
+                tracked = settings.rangeSpells[entry.id]
+            elseif alternatives then
+                tracked = alternatives[entry.id]
+            else
+                tracked = Addon.FindPin(section, entry.id, filter)
+            end
             row.mark:SetText(tracked and "✓" or "")
         end
     end
@@ -164,9 +167,17 @@ local function addAuraID()
         picker.status:SetText("Enter the effect's aura spell ID.")
         return
     end
-    Addon.Pin(picker.section, id, picker.filter)
+    if picker.section == "alternatives" then
+        if id == picker.reminderID or id == picker.auraID then
+            picker.status:SetText("This buff is already checked by the reminder.")
+            return
+        end
+        Addon.SetBuffAlternative(picker.reminderID, picker.auraID, id, true)
+    else
+        Addon.Pin(picker.section, id, picker.filter)
+    end
     picker.search:SetText("")
-    picker.status:SetText("Aura added. View it under Tracked.")
+    picker.status:SetText(picker.section == "alternatives" and "Alternative added. View it under Selected." or "Aura added. View it under Tracked.")
 end
 
 local function movePin(section, id, filter, offset)
@@ -210,7 +221,7 @@ local function makePicker(manager)
     picker.mode = button(picker, "Tracked", 90, function(self)
         picker.trackedOnly = not picker.trackedOnly
         picker.page = 1
-        self:SetText(picker.trackedOnly and "Browse" or "Tracked")
+        self:SetText(picker.trackedOnly and "Browse" or picker.section == "alternatives" and "Selected" or "Tracked")
         Addon.UpdateChoices()
     end)
     picker.mode:SetPoint("TOPRIGHT", -14, -32)
@@ -236,6 +247,14 @@ local function makePicker(manager)
             if not self.entry then return end
             local id = self.entry.id
             local section, filter = picker.section, picker.filter
+            if section == "alternatives" then
+                if mouseButton == "LeftButton" then
+                    local override = Addon.GetIconOverride("auras", picker.reminderID, "HELPFUL")
+                    local selected = override and override.alternatives and override.alternatives[id]
+                    Addon.SetBuffAlternative(picker.reminderID, picker.auraID, id, not selected)
+                end
+                return
+            end
             if section == "range" then
                 if mouseButton == "LeftButton" then
                     local settings = Addon.GetSettings("cooldowns")
@@ -269,7 +288,10 @@ local function makePicker(manager)
             if not self.entry then return end
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetSpellByID(self.entry.id)
-            GameTooltip:AddLine(picker.section == "range" and "Left-click to toggle range tracking" or "Left-click to track · Right-click for display", 0.8, 0.8, 0.8)
+            local hint = picker.section == "alternatives" and "Left-click to toggle this alternative"
+                or picker.section == "range" and "Left-click to toggle range tracking"
+                or "Left-click to track · Right-click for display"
+            GameTooltip:AddLine(hint, 0.8, 0.8, 0.8)
             GameTooltip:Show()
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -299,15 +321,22 @@ local function makePicker(manager)
     picker.hint = hint
 end
 
-local function openPicker(section, filter)
+openPicker = function(section, filter, reminderID, auraID)
     if not CooldownViewerSettings:IsVisible() then return end
     if not picker then makePicker(CooldownViewerSettings) end
     picker.section, picker.filter = section, filter
+    picker.reminderID, picker.auraID = reminderID, auraID
     picker.trackedOnly, picker.page = false, 1
-    picker.mode:SetText("Tracked")
-    picker.TitleText:SetText(section == "range" and "Essential range abilities" or filter == "HELPFUL" and "Add self buffs" or "Add self debuffs")
+    picker.mode:SetText(section == "alternatives" and "Selected" or "Tracked")
+    local title = section == "alternatives" and "Alternative buffs"
+        or section == "range" and "Essential range abilities"
+        or filter == "HELPFUL" and "Add self buffs" or "Add self debuffs"
+    picker.TitleText:SetText(title)
     picker.addID:SetShown(section ~= "range")
-    picker.hint:SetText(section == "range" and "Click to toggle an Essential range icon." or "Click to toggle tracking. Right-click for display.")
+    local hint = section == "alternatives" and "Any selected buff suppresses this reminder."
+        or section == "range" and "Click to toggle an Essential range icon."
+        or "Click to toggle tracking. Right-click for display."
+    picker.hint:SetText(hint)
     picker.search:SetText("")
     picker.status:SetText("")
     picker:Show()

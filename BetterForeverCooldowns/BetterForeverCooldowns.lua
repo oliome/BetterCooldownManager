@@ -198,13 +198,17 @@ function Addon.GetIconOverride(section, id, filter)
     return db[section].overrides[id] or pin
 end
 
-function Addon.SetIconOverride(section, id, filter, key, value)
+local function editableOverride(section, id, filter)
     local overrides = db[section].overrides
     if not overrides[id] then
         local previous = Addon.GetIconOverride(section, id, filter)
         overrides[id] = { numbers = previous and previous.numbers, swipe = previous and previous.swipe }
     end
-    overrides[id][key] = value
+    return overrides[id]
+end
+
+function Addon.SetIconOverride(section, id, filter, key, value)
+    editableOverride(section, id, filter)[key] = value
     Addon.ApplySettings()
 end
 
@@ -426,37 +430,75 @@ local function isMissingBuff(id)
     return true
 end
 
-function Addon.IsMageArmor(id)
-    if type(id) ~= "number" then return false end
-    local name = spellMetadata(id)
-    return name == spellMetadata(7302) or name == spellMetadata(6117) or name == spellMetadata(168)
-end
-
 local function missingForOverride(id, override)
     if not isMissingBuff(id) then return false end
-    if override.alternatives then
-        for activeID in pairs(activeAuras.HELPFUL) do
-            if Addon.IsMageArmor(activeID) then return false end
-        end
+    for alternative in pairs(override.alternatives or {}) do
+        if not isMissingBuff(alternative) then return false end
     end
     return true
 end
 
-function Addon.SetArmorReminder(id, auraID, enabled)
-    local overrides = db.auras.overrides
+function Addon.SetMissingReminder(id, auraID, enabled)
+    local override = editableOverride("auras", id, "HELPFUL")
+    override.auraID = auraID
+    override.visibility = enabled and "missing" or nil
+    Addon.ApplySettings()
+end
+
+function Addon.SetBuffAlternative(id, auraID, alternative, enabled)
+    if alternative == id or alternative == auraID then return end
+    local override = editableOverride("auras", id, "HELPFUL")
+    override.alternatives = override.alternatives or {}
+    override.alternatives[alternative] = enabled and true or nil
     if enabled then
-        for key, override in pairs(overrides) do
-            if key ~= id and Addon.IsMageArmor(override.auraID or key) and override.visibility == "missing" then
-                override.visibility, override.alternatives = nil, nil
-            end
-        end
-        Addon.SetIconOverride("auras", id, "HELPFUL", "auraID", auraID)
-        overrides[id].alternatives = true
-        overrides[id].visibility = "missing"
-    elseif overrides[id] then
-        overrides[id].alternatives, overrides[id].visibility = nil, nil
+        override.auraID = auraID
+        override.visibility = "missing"
     end
     Addon.ApplySettings()
+end
+
+function Addon.GetBuffAlternatives(id, auraID, selectedOnly)
+    local entries, seen = {}, { [id] = true, [auraID] = true }
+    local function add(spellID)
+        if not spellID or seen[spellID] then return end
+        seen[spellID] = true
+        entries[#entries + 1] = Addon.GetEntryDetails("auras", spellID)
+    end
+    local override = Addon.GetIconOverride("auras", id, "HELPFUL")
+    for spellID in pairs(override and override.alternatives or {}) do add(spellID) end
+    if not selectedOnly then
+        for spellID in pairs(activeAuras.HELPFUL) do add(spellID) end
+        for _, pin in ipairs(db.auras.entries) do
+            if pin.filter == "HELPFUL" then add(pin.id) end
+        end
+        local manager = _G.CooldownViewerSettings
+        if manager and manager.categoryPool then
+            for display in manager.categoryPool:EnumerateActive() do
+                if display:GetCategoryObject():GetCategory() == Enum.CooldownViewerCategory.TrackedBuff then
+                    for item in display.itemPool:EnumerateActive() do
+                        add(number(apiCall(item.GetSpellID, item)))
+                    end
+                end
+            end
+        end
+    end
+    table.sort(entries, sortEntries)
+    return entries
+end
+
+local function migrateBuffAlternatives()
+    for id, override in pairs(db.auras.overrides) do
+        if override.alternatives == true then
+            -- Preserve the old armor reminder as an editable list of spell IDs.
+            local alternatives = {}
+            for _, spellID in ipairs({ 168, 7300, 7301, 7302, 7320, 10219, 10220, 6117, 22782, 22783 }) do
+                if spellID ~= id and spellID ~= override.auraID then alternatives[spellID] = true end
+            end
+            override.alternatives = alternatives
+        elseif type(override.alternatives) ~= "table" then
+            override.alternatives = nil
+        end
+    end
 end
 
 local function auraEntries(settings, visible)
@@ -879,6 +921,7 @@ driver:SetScript("OnEvent", function(_, event, name)
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
         db = BetterForeverCooldownsDB
         fillDefaults(db, defaults)
+        migrateBuffAlternatives()
         db.cooldowns.showAll, db.cooldowns.allRanks = nil, nil
         db.auras.showMissing = nil
         if type(db.cooldowns.entries) == "table" then
