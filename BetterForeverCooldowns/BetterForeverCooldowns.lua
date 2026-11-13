@@ -4,6 +4,7 @@ local spells, spellsByID = {}, {}
 local activeAuras = { HELPFUL = {}, HARMFUL = {} }
 local auraListComplete = {}
 local auraSection
+local essentialExtras, itemExtras
 local unknownIcon = 134400
 local viewerNames = {
     cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
@@ -15,13 +16,13 @@ local defaults = {
         numbers = true, swipe = true, stacks = true, ignoreGCD = true,
         styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
-        overrides = {},
+        overrides = {}, rangeSpells = {}, items = {},
     },
     auras = {
         numbers = true, swipe = true, stacks = true, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
         size = 38, gap = 4, columns = 12, alignment = "CENTER",
-        entries = {}, overrides = {},
+        entries = {}, overrides = {}, barStacks = true,
     },
 }
 
@@ -126,6 +127,35 @@ function Addon.GetAuraChoices(filter)
     end
     table.sort(choices, sortEntries)
     return choices
+end
+
+function Addon.GetRangeChoices()
+    local choices = {}
+    for _, spell in ipairs(spells) do
+        local hasRange = apiCall(C_Spell.SpellHasRange, spell.id)
+        if not spell.lowerRank and readable(hasRange) and hasRange == true then
+            choices[#choices + 1] = spell
+        end
+    end
+    return choices
+end
+
+local conjuredItems = {
+    { name = "Healthstone", ids = { 19013, 19012, 9421, 19011, 19010, 5510, 19009, 19008, 5509, 19007, 19006, 5511, 19005, 19004, 5512 } },
+    { name = "Mana Gem", ids = { 8008, 8007, 5513, 5514 } },
+    { name = "Soulstone", ids = { 16896, 16895, 16893, 16892, 5232 } },
+}
+
+function Addon.GetConjuredItems()
+    return conjuredItems
+end
+
+function Addon.GetConjuredItem(family)
+    for _, id in ipairs(family.ids) do
+        local count = number(apiCall(C_Item.GetItemCount, id))
+        if count and count > 0 then return id, count end
+    end
+    return family.ids[1], 0
 end
 
 function Addon.GetEntryDetails(section, id)
@@ -354,7 +384,11 @@ local function createIcon(parent, onCooldownDone)
     icon:SetScript("OnEnter", function(self)
         if not self.entry then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetSpellByID(self.entry.id)
+        if self.entry.item then
+            GameTooltip:SetItemByID(self.entry.id)
+        else
+            GameTooltip:SetSpellByID(self.entry.id)
+        end
         if self.missing:IsShown() then GameTooltip:AddLine("Missing buff", 1, 0.55, 0.3) end
         GameTooltip:Show()
     end)
@@ -392,13 +426,46 @@ local function isMissingBuff(id)
     return true
 end
 
+function Addon.IsMageArmor(id)
+    if type(id) ~= "number" then return false end
+    local name = spellMetadata(id)
+    return name == spellMetadata(7302) or name == spellMetadata(6117) or name == spellMetadata(168)
+end
+
+local function missingForOverride(id, override)
+    if not isMissingBuff(id) then return false end
+    if override.alternatives then
+        for activeID in pairs(activeAuras.HELPFUL) do
+            if Addon.IsMageArmor(activeID) then return false end
+        end
+    end
+    return true
+end
+
+function Addon.SetArmorReminder(id, auraID, enabled)
+    local overrides = db.auras.overrides
+    if enabled then
+        for key, override in pairs(overrides) do
+            if key ~= id and Addon.IsMageArmor(override.auraID or key) and override.visibility == "missing" then
+                override.visibility, override.alternatives = nil, nil
+            end
+        end
+        Addon.SetIconOverride("auras", id, "HELPFUL", "auraID", auraID)
+        overrides[id].alternatives = true
+        overrides[id].visibility = "missing"
+    elseif overrides[id] then
+        overrides[id].alternatives, overrides[id].visibility = nil, nil
+    end
+    Addon.ApplySettings()
+end
+
 local function auraEntries(settings, visible)
     local entries = {}
     for _, pin in ipairs(settings.entries) do
         local aura = activeAuras[pin.filter][pin.id]
         local override = Addon.GetIconOverride("auras", pin.id, pin.filter)
         local missingOnly = pin.filter == "HELPFUL" and override and override.visibility == "missing"
-        local missing = missingOnly and isMissingBuff(pin.id)
+        local missing = missingOnly and missingForOverride(pin.id, override)
         if (pin.filter == "HARMFUL" or not visible[pin.id]) and (missing or (aura and not missingOnly)) then
             entries[#entries + 1] = {
                 entry = Addon.GetEntryDetails("auras", pin.id),
@@ -464,6 +531,96 @@ local savedStyles = setmetatable({}, { __mode = "k" })
 local rankIcons = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
+local function updateRange(icon)
+    local inRange = apiCall(C_Spell.IsSpellInRange, icon.entry.id, "target")
+    if readable(inRange) and inRange == false then
+        icon.texture:SetVertexColor(1, 0.25, 0.25)
+    else
+        icon.texture:SetVertexColor(1, 1, 1)
+    end
+end
+
+local function updateConjured(icon, family)
+    local id, count = Addon.GetConjuredItem(family)
+    if count == 0 and icon.family == family and icon.entry then id = icon.entry.id end
+    icon.family = family
+    icon.entry = { id = id, item = true }
+    icon.texture:SetTexture(C_Item.GetItemIconByID(id) or unknownIcon)
+    icon.texture:SetDesaturated(count == 0)
+    icon.count:SetText(count)
+    local info = apiCall(C_Spell.GetItemCooldown, id)
+    if not setSpellTimerFromNumbers(icon.cooldown, info, false) then
+        local ok, start, duration, enabled = pcall(C_Item.GetItemCooldown, id)
+        start, duration = number(start), number(duration)
+        if ok and readable(enabled) and enabled and start and duration and start > 0 and duration > 0 then
+            icon.cooldown:SetCooldown(start, duration)
+        else
+            icon.cooldown:Clear()
+        end
+    end
+end
+
+local function updateExtraRow(frame, anchor, entries, render)
+    if not anchor or not anchor:IsVisible() or (anchor.IsEditing and anchor:IsEditing()) or #entries == 0 then
+        frame:Hide()
+        return
+    end
+    local size, gap = 34, 4
+    local width = math.min(12, #entries)
+    frame:SetSize(width * (size + gap) - gap, math.ceil(#entries / 12) * (size + gap) - gap)
+    frame:ClearAllPoints()
+    frame:SetPoint("TOP", anchor, "BOTTOM", 0, -gap)
+    frame:SetFrameStrata(anchor:GetFrameStrata())
+    for index, entry in ipairs(entries) do
+        local icon = frame.icons[index]
+        if not icon then
+            icon = createIcon(frame)
+            icon.missing:Hide()
+            frame.icons[index] = icon
+        end
+        icon:ClearAllPoints()
+        icon:SetPoint("TOPLEFT", ((index - 1) % 12) * (size + gap), -math.floor((index - 1) / 12) * (size + gap))
+        icon:SetSize(size, size)
+        applyTimerStyle(icon.cooldown, db.cooldowns)
+        render(icon, entry)
+        icon:Show()
+    end
+    for index = #entries + 1, #frame.icons do frame.icons[index]:Hide() end
+    frame:Show()
+end
+
+local function updateExtras()
+    local essential, utility = _G.EssentialCooldownViewer, _G.UtilityCooldownViewer
+    local existing = {}
+    if essential and essential.itemFramePool then
+        for item in essential.itemFramePool:EnumerateActive() do
+            if item:IsVisible() then
+                local id = number(apiCall(item.GetSpellID, item))
+                local base = number(apiCall(item.GetBaseSpellID, item))
+                if id then existing[id] = true end
+                if base then existing[base] = true end
+            end
+        end
+    end
+    local rangeEntries = {}
+    for _, spell in ipairs(spells) do
+        if db.cooldowns.rangeSpells[spell.id] and not existing[spell.id] then rangeEntries[#rangeEntries + 1] = spell end
+    end
+    updateExtraRow(essentialExtras, essential, rangeEntries, function(icon, spell)
+        icon.entry = spell
+        icon.texture:SetTexture(spell.icon)
+        updateRange(icon)
+        updateSpellTimer(icon, db.cooldowns)
+    end)
+    local items = {}
+    for _, family in ipairs(conjuredItems) do
+        if db.cooldowns.items[family.name] then items[#items + 1] = family end
+    end
+    local itemAnchor = utility and utility:IsVisible() and utility or essential
+    if itemAnchor == essential and essentialExtras:IsShown() then itemAnchor = essentialExtras end
+    updateExtraRow(itemExtras, itemAnchor, items, updateConjured)
+end
+
 
 local function viewerOverride(item, key, id)
     local settings = db[key]
@@ -501,7 +658,7 @@ local function updateNativeIcon(item, viewer, key)
         if mode == "ready" then
             show = isSpellReady(rank and rank.id or id)
         else
-            show = isMissingBuff(override.auraID or id)
+            show = missingForOverride(override.auraID or id, override)
             local activeID = number(apiCall(item.GetAuraSpellID, item))
             if activeID and activeAuras.HELPFUL[activeID] then show = false end
         end
@@ -623,11 +780,11 @@ local function styleBlizzardViewers()
                     local function refreshViewer(self) styleViewer(self, key) end
                     local layoutPending
                     local function queueLayout()
-                        if key ~= "auras" or layoutPending then return end
+                        if layoutPending then return end
                         layoutPending = true
                         C_Timer.After(0, function()
                             layoutPending = false
-                            layoutAuras()
+                            if key == "auras" then layoutAuras() else updateExtras() end
                         end)
                     end
                     hooksecurefunc(viewer, "RefreshData", function(self)
@@ -649,9 +806,33 @@ local function styleBlizzardViewers()
     end
 end
 
+local function updateBarStacks()
+    local viewer = _G.BuffBarCooldownViewer
+    if not viewer or not viewer.itemFramePool then return end
+    for item in viewer.itemFramePool:EnumerateActive() do
+        local label = item:GetApplicationsFontString()
+        if label then
+            label:ClearAllPoints()
+            label:SetPoint("BOTTOMRIGHT", item:GetIconFrame(), "BOTTOMRIGHT", -2, 2)
+            label:SetShown(db.auras.barStacks)
+        end
+    end
+end
+
+local function attachBarStacks()
+    local viewer = _G.BuffBarCooldownViewer
+    if viewer and not viewerHooks[viewer] then
+        hooksecurefunc(viewer, "RefreshData", updateBarStacks)
+        viewerHooks[viewer] = true
+    end
+    updateBarStacks()
+end
+
 function Addon.ApplySettings()
     styleBlizzardViewers()
     layoutAuras()
+    updateExtras()
+    attachBarStacks()
     if Addon.UpdateOptions then Addon.UpdateOptions() end
 end
 
@@ -667,6 +848,7 @@ local function refresh()
     pending = {}
     if update.catalog then scanSpellbook() end
     if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
+    if update.catalog or update.cooldowns or update.items then updateExtras() end
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
@@ -674,6 +856,7 @@ local function refresh()
     end
     if update.blizzard then
         styleBlizzardViewers()
+        attachBarStacks()
         Addon.AttachOptions()
     end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
@@ -682,6 +865,9 @@ end
 local driver = CreateFrame("Frame")
 driver:RegisterEvent("ADDON_LOADED")
 driver:RegisterEvent("PLAYER_LOGIN")
+driver:RegisterEvent("BAG_UPDATE_DELAYED")
+driver:RegisterEvent("BAG_UPDATE_COOLDOWN")
+driver:RegisterEvent("PLAYER_TARGET_CHANGED")
 for event in pairs(catalogEvents) do driver:RegisterEvent(event) end
 driver:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 driver:RegisterEvent("SPELL_UPDATE_CHARGES")
@@ -704,6 +890,17 @@ driver:SetScript("OnEvent", function(_, event, name)
         end
         db.cooldowns.entries = nil
         auraSection = createSection()
+        essentialExtras = createSection()
+        itemExtras = createSection()
+        local elapsed = 0
+        essentialExtras:SetScript("OnUpdate", function(self, delta)
+            elapsed = elapsed + delta
+            if elapsed < 0.15 then return end
+            elapsed = 0
+            for _, icon in ipairs(self.icons) do
+                if icon:IsShown() then updateRange(icon) end
+            end
+        end)
         return
     end
     if not db then return end
@@ -716,6 +913,8 @@ driver:SetScript("OnEvent", function(_, event, name)
         pending.catalog = true
     elseif event == "UNIT_AURA" then
         pending.auras = true
+    elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_TARGET_CHANGED" then
+        pending.items = true
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         pending.cooldowns, pending.auras = true, true
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_CHARGES" then

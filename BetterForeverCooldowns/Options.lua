@@ -70,9 +70,19 @@ local function missingToggle(menu, id, auraID)
     end
     menu:CreateCheckbox("Show only when missing", checked, function()
         local mode = not checked() and "missing" or nil
+        Addon.SetIconOverride("auras", id, "HELPFUL", "alternatives", nil)
         if mode then Addon.SetIconOverride("auras", id, "HELPFUL", "auraID", auraID) end
         Addon.SetIconOverride("auras", id, "HELPFUL", "visibility", mode)
     end)
+    if Addon.IsMageArmor(auraID) then
+        local function armorChecked()
+            local override = Addon.GetIconOverride("auras", id, "HELPFUL")
+            return override and override.alternatives == true and override.visibility == "missing"
+        end
+        menu:CreateCheckbox("Show only when no Mage armor is active", armorChecked, function()
+            Addon.SetArmorReminder(id, auraID, not armorChecked())
+        end)
+    end
 end
 
 local function iconMenu(menu, section, id, filter)
@@ -106,7 +116,12 @@ function Addon.UpdateChoices()
     local settings = Addon.GetSettings(section)
     local query = picker.search:GetText():lower():match("^%s*(.-)%s*$")
     local entries = {}
-    if picker.trackedOnly then
+    if section == "range" then
+        settings = Addon.GetSettings("cooldowns")
+        for _, spell in ipairs(Addon.GetRangeChoices()) do
+            if not picker.trackedOnly or settings.rangeSpells[spell.id] then entries[#entries + 1] = spell end
+        end
+    elseif picker.trackedOnly then
         for _, pin in ipairs(settings.entries) do
             if pin.filter == filter then entries[#entries + 1] = Addon.GetEntryDetails(section, pin.id) end
         end
@@ -131,7 +146,8 @@ function Addon.UpdateChoices()
         if entry then
             row.icon:SetTexture(entry.icon)
             row.label:SetText(entry.text)
-            row.mark:SetText(Addon.FindPin(section, entry.id, filter) and "✓" or "")
+            local tracked = section == "range" and settings.rangeSpells[entry.id] or Addon.FindPin(section, entry.id, filter)
+            row.mark:SetText(tracked and "✓" or "")
         end
     end
     picker.empty:SetShown(#matches == 0)
@@ -220,6 +236,15 @@ local function makePicker(manager)
             if not self.entry then return end
             local id = self.entry.id
             local section, filter = picker.section, picker.filter
+            if section == "range" then
+                if mouseButton == "LeftButton" then
+                    local settings = Addon.GetSettings("cooldowns")
+                    settings.rangeSpells[id] = not settings.rangeSpells[id] or nil
+                    Addon.ApplySettings()
+                    Addon.RefreshCategoryButtons()
+                end
+                return
+            end
             if mouseButton == "RightButton" then
                 MenuUtil.CreateContextMenu(self, function(_, root)
                     if filter == "HELPFUL" then missingToggle(root, id, id) end
@@ -244,7 +269,7 @@ local function makePicker(manager)
             if not self.entry then return end
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetSpellByID(self.entry.id)
-            GameTooltip:AddLine("Left-click to track · Right-click for display", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine(picker.section == "range" and "Left-click to toggle range tracking" or "Left-click to track · Right-click for display", 0.8, 0.8, 0.8)
             GameTooltip:Show()
         end)
         row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -271,7 +296,7 @@ local function makePicker(manager)
     picker.status:SetPoint("BOTTOMLEFT", 16, 27)
     local hint = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     hint:SetPoint("BOTTOMLEFT", 16, 12)
-    hint:SetText("Click to toggle tracking. Right-click for display.")
+    picker.hint = hint
 end
 
 local function openPicker(section, filter)
@@ -280,7 +305,9 @@ local function openPicker(section, filter)
     picker.section, picker.filter = section, filter
     picker.trackedOnly, picker.page = false, 1
     picker.mode:SetText("Tracked")
-    picker.TitleText:SetText(filter == "HELPFUL" and "Add self buffs" or "Add self debuffs")
+    picker.TitleText:SetText(section == "range" and "Essential range abilities" or filter == "HELPFUL" and "Add self buffs" or "Add self debuffs")
+    picker.addID:SetShown(section ~= "range")
+    picker.hint:SetText(section == "range" and "Click to toggle an Essential range icon." or "Click to toggle tracking. Right-click for display.")
     picker.search:SetText("")
     picker.status:SetText("")
     picker:Show()
@@ -290,10 +317,80 @@ end
 local function settingsMenu(_, root)
     root:CreateDivider()
     displayMenu(root:CreateButton("Cooldown icon display"), "cooldowns")
+    root:CreateButton("Add Essential range abilities…", function() openPicker("range") end)
     local auras = root:CreateButton("Self auras")
     auras:CreateButton("Add self buffs…", function() openPicker("auras", "HELPFUL") end)
     auras:CreateButton("Add self debuffs…", function() openPicker("auras", "HARMFUL") end)
     displayMenu(auras:CreateButton("Aura icon display"), "auras")
+    addToggle(auras, "Stacks on tracked bar icons", "auras", "barStacks")
+end
+
+local categoryButtons = setmetatable({}, { __mode = "k" })
+
+local function updateCategoryButtons(manager)
+    local categories = Enum.CooldownViewerCategory
+    for display in manager.categoryPool:EnumerateActive() do
+        local category = display:GetCategoryObject():GetCategory()
+        local buttons = categoryButtons[display]
+        if category == categories.SpecAgnosticEssential or category == categories.Essential or buttons then
+            buttons = buttons or {}
+            categoryButtons[display] = buttons
+            local count = 0
+            local function add(label, texture, action, selected)
+                count = count + 1
+                local icon = buttons[count]
+                if not icon then
+                    icon = CreateFrame("Button", nil, display.Container)
+                    icon:SetSize(36, 36)
+                    icon.layoutIndex = 100000 + count
+                    icon:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+                    icon:SetScript("OnEnter", function(self)
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(self.tooltip)
+                        GameTooltip:Show()
+                    end)
+                    icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                    buttons[count] = icon
+                end
+                icon.tooltip = label
+                icon:SetNormalTexture(texture)
+                icon:GetNormalTexture():SetDesaturated(selected == false)
+                icon:SetScript("OnClick", action)
+                icon:Show()
+            end
+            if category == categories.SpecAgnosticEssential then
+                for _, family in ipairs(Addon.GetConjuredItems()) do
+                    local id = Addon.GetConjuredItem(family)
+                    local items = Addon.GetSettings("cooldowns").items
+                    add(family.name .. " — click to toggle tracking", C_Item.GetItemIconByID(id) or 134400, function()
+                        items[family.name] = not items[family.name] or nil
+                        Addon.ApplySettings()
+                        updateCategoryButtons(manager)
+                    end, items[family.name] == true)
+                end
+            elseif category == categories.Essential then
+                add("Add Essential range abilities", 136243, function() openPicker("range") end, true)
+                local selected = Addon.GetSettings("cooldowns").rangeSpells
+                for _, spell in ipairs(Addon.GetRangeChoices()) do
+                    if selected[spell.id] then
+                        add(spell.name .. " — click to remove range tracking", spell.icon, function()
+                            selected[spell.id] = nil
+                            Addon.ApplySettings()
+                            updateCategoryButtons(manager)
+                        end, true)
+                    end
+                end
+            end
+            for index = count + 1, #buttons do buttons[index]:Hide() end
+            display.Container:Layout()
+            display:Layout()
+        end
+    end
+end
+
+function Addon.RefreshCategoryButtons()
+    local manager = CooldownViewerSettings
+    if manager and manager:IsVisible() and manager.categoryPool then updateCategoryButtons(manager) end
 end
 
 local function itemMenu(owner, root)
@@ -355,6 +452,16 @@ function Addon.AttachOptions()
     attached = true
     Menu.ModifyMenu("COOLDOWN_VIEWER_SETTINGS_MENU", settingsMenu)
     Menu.ModifyMenu("MENU_COOLDOWN_SETTINGS_ITEM", itemMenu)
+    local manager = CooldownViewerSettings
+    if manager and manager.categoryPool then
+        hooksecurefunc(manager, "ClearDisplayCategories", function()
+            for _, buttons in pairs(categoryButtons) do
+                for _, icon in ipairs(buttons) do icon:Hide() end
+            end
+        end)
+        hooksecurefunc(manager, "RefreshLayout", updateCategoryButtons)
+        if manager:IsVisible() then updateCategoryButtons(manager) end
+    end
 end
 
 function Addon.ShowOptions()
