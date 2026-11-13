@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Better Forever Cooldowns
 ## Notes: Customize Blizzard cooldown icons and track learned abilities, buffs, and debuffs.
-## Version: 0.5.8
+## Version: 0.5.13
 ## Dependencies: Blizzard_CooldownViewer
 ## SavedVariablesPerCharacter: BetterForeverCooldownsDB
 

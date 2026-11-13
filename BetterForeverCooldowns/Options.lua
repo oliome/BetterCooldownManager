@@ -355,23 +355,10 @@ openPicker = function(section, filter, reminderID, auraID)
     Addon.UpdateChoices()
 end
 
-local function toggleConjuredItem(family)
-    local items = Addon.GetSettings("cooldowns").items
-    items[family.name] = not items[family.name] or nil
-    Addon.ApplySettings()
-    Addon.RefreshCategoryButtons()
-end
-
 local function settingsMenu(_, root)
     root:CreateDivider()
     displayMenu(root:CreateButton("Cooldown icon display"), "cooldowns")
     root:CreateButton("Add Essential range abilities…", function() openPicker("range") end)
-    local conjured = root:CreateButton("Conjured items")
-    for _, family in ipairs(Addon.GetConjuredItems()) do
-        conjured:CreateCheckbox(family.name, function()
-            return Addon.GetSettings("cooldowns").items[family.name] == true
-        end, function() toggleConjuredItem(family) end)
-    end
     local auras = root:CreateButton("Self auras")
     auras:CreateButton("Add self buffs…", function() openPicker("auras", "HELPFUL") end)
     auras:CreateButton("Add self debuffs…", function() openPicker("auras", "HARMFUL") end)
@@ -384,12 +371,9 @@ local categoryButtons = setmetatable({}, { __mode = "k" })
 local function updateCategoryButtons(manager)
     local categories = Enum.CooldownViewerCategory
     for display in manager.categoryPool:EnumerateActive() do
-        local categoryObject = display:GetCategoryObject()
-        local category = categoryObject:GetCategory()
-        -- The Items group reports EquipSlotEssential as its primary category.
-        local isItems = categoryObject:MatchesCategory(categories.SpecAgnosticEssential)
+        local category = display:GetCategoryObject():GetCategory()
         local buttons = categoryButtons[display]
-        if isItems or category == categories.Essential or buttons then
+        if category == categories.Essential or buttons then
             buttons = buttons or {}
             categoryButtons[display] = buttons
             local count = 0
@@ -415,16 +399,7 @@ local function updateCategoryButtons(manager)
                 icon:SetScript("OnClick", action)
                 icon:Show()
             end
-            if isItems then
-                for _, family in ipairs(Addon.GetConjuredItems()) do
-                    local id = Addon.GetConjuredItem(family)
-                    local items = Addon.GetSettings("cooldowns").items
-                    local itemName = C_Item.GetItemNameByID and C_Item.GetItemNameByID(id)
-                    local label = itemName and itemName ~= family.name and (family.name .. " (" .. itemName .. ")") or family.name
-                    add(label .. " — click to toggle tracking", C_Item.GetItemIconByID(id) or 134400,
-                        function() toggleConjuredItem(family) end, items[family.name] == true)
-                end
-            elseif category == categories.Essential then
+            if category == categories.Essential then
                 add("Add Essential range abilities", 136243, function() openPicker("range") end, true)
                 local selected = Addon.GetSettings("cooldowns").rangeSpells
                 for _, spell in ipairs(Addon.GetRangeChoices()) do
@@ -489,6 +464,9 @@ local function itemMenu(owner, root)
         root:CreateCheckbox("Show only when ready", function() return current("visibility") == "ready" end, function()
             local mode = current("visibility") ~= "ready" and "ready" or nil
             set("visibility", mode)
+        end)
+        root:CreateCheckbox("Show spell cooldown only", function() return current("spellCooldownOnly") == true end, function()
+            set("spellCooldownOnly", current("spellCooldownOnly") ~= true)
         end)
     elseif displayID then
         missingToggle(root, id, displayID)

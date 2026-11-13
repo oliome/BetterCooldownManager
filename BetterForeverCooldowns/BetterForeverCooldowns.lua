@@ -4,8 +4,14 @@ local spells, spellsByID = {}, {}
 local activeAuras = { HELPFUL = {}, HARMFUL = {} }
 local auraListComplete = {}
 local auraSection
-local essentialExtras, itemExtras
+local essentialExtras
 local unknownIcon = 134400
+local unknownAlpha = 0.7
+local manaGemsSpellID = 1318827
+local manaGemItemIDs = { 5514, 5513, 8007, 8008 }
+local manaGemsMissing
+local manaGemHooks = setmetatable({}, { __mode = "k" })
+local manaGemSettingsAttached
 local viewerNames = {
     cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
     auras = { "BuffIconCooldownViewer" },
@@ -16,7 +22,7 @@ local defaults = {
         numbers = true, swipe = true, stacks = true, ignoreGCD = true,
         styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
-        overrides = {}, rangeSpells = {}, items = {},
+        overrides = {}, rangeSpells = {},
     },
     auras = {
         numbers = true, swipe = true, stacks = true, styleBlizzard = true,
@@ -49,6 +55,61 @@ local function apiCall(callback, ...)
     if not callback then return end
     local ok, result = pcall(callback, ...)
     if ok then return result end
+end
+
+local function isManaGems(item)
+    return number(apiCall(item.GetBaseSpellID, item)) == manaGemsSpellID
+        or number(apiCall(item.GetSpellID, item)) == manaGemsSpellID
+end
+
+local function refreshManaGemIcon(item, method)
+    if not isManaGems(item) then return end
+    if not manaGemHooks[item] then
+        hooksecurefunc(item, method, function(self)
+            if manaGemsMissing and isManaGems(self) then
+                local icon = method == "RefreshIconState" and self.Icon or self:GetIconTexture()
+                if icon then icon:SetDesaturated(true) end
+            end
+        end)
+        manaGemHooks[item] = true
+    end
+    item[method](item)
+end
+
+local function refreshManaGemSettings(manager)
+    for display in manager.categoryPool:EnumerateActive() do
+        for item in display.itemPool:EnumerateActive() do
+            refreshManaGemIcon(item, "RefreshIconState")
+        end
+    end
+end
+
+local function refreshManaGemAvailability()
+    local missing = true
+    for _, id in ipairs(manaGemItemIDs) do
+        if number(apiCall(C_Item.GetItemCount, id, false)) ~= 0 then
+            missing = false
+            break
+        end
+    end
+    manaGemsMissing = missing
+
+    for _, name in ipairs(viewerNames.cooldowns) do
+        local viewer = _G[name]
+        if viewer and viewer.itemFramePool then
+            for item in viewer.itemFramePool:EnumerateActive() do
+                refreshManaGemIcon(item, "RefreshIconDesaturation")
+            end
+        end
+    end
+    local manager = _G.CooldownViewerSettings
+    if manager and manager.categoryPool then
+        if not manaGemSettingsAttached then
+            hooksecurefunc(manager, "RefreshLayout", refreshManaGemSettings)
+            manaGemSettingsAttached = true
+        end
+        if manager:IsShown() then refreshManaGemSettings(manager) end
+    end
 end
 
 local function spellMetadata(id)
@@ -138,24 +199,6 @@ function Addon.GetRangeChoices()
         end
     end
     return choices
-end
-
-local conjuredItems = {
-    { name = "Healthstone", ids = { 19013, 19012, 9421, 19011, 19010, 5510, 19009, 19008, 5509, 19007, 19006, 5511, 19005, 19004, 5512 } },
-    { name = "Mana Gem", ids = { 8008, 8007, 5513, 5514 } },
-    { name = "Soulstone", ids = { 16896, 16895, 16893, 16892, 5232 } },
-}
-
-function Addon.GetConjuredItems()
-    return conjuredItems
-end
-
-function Addon.GetConjuredItem(family)
-    for _, id in ipairs(family.ids) do
-        local count = number(apiCall(C_Item.GetItemCount, id))
-        if count and count > 0 then return id, count end
-    end
-    return family.ids[1], 0
 end
 
 function Addon.GetEntryDetails(section, id)
@@ -288,7 +331,14 @@ local function updateSpellTimer(icon, settings)
     local spell = icon.entry
     local book = C_SpellBook
     local bank = Enum.SpellBookSpellBank.Player
-    local charges = apiCall(book.GetSpellBookItemCharges, spell.slot, bank)
+    local id = spell.id
+    if not spell.lowerRank then
+        local overrideID = number(apiCall(C_Spell.GetOverrideSpell, id))
+        if overrideID and overrideID > 0 then id = overrideID end
+    end
+    local charges
+    if spell.slot then charges = apiCall(book.GetSpellBookItemCharges, spell.slot, bank) end
+    if readable(charges) and not charges then charges = apiCall(C_Spell.GetSpellCharges, id) end
     local current, maximum
     if readable(charges) and charges then
         current = number(charges.currentCharges)
@@ -299,7 +349,8 @@ local function updateSpellTimer(icon, settings)
     local duration
     local recharging = current and maximum and current < maximum
     if recharging then
-        duration = apiCall(book.GetSpellBookItemChargeDuration, spell.slot, bank)
+        if spell.slot then duration = apiCall(book.GetSpellBookItemChargeDuration, spell.slot, bank) end
+        if readable(duration) and not duration then duration = apiCall(C_Spell.GetSpellChargeDuration, id) end
     end
     local cooldown = icon.cooldown
     if setDuration(cooldown, duration) then return end
@@ -311,16 +362,14 @@ local function updateSpellTimer(icon, settings)
             return
         end
     end
-    duration = apiCall(book.GetSpellBookItemCooldownDuration, spell.slot, bank, settings.ignoreGCD)
-    if setDuration(cooldown, duration) then return end
-    local id = spell.id
-    if not spell.lowerRank then
-        local overrideID = number(apiCall(C_Spell.GetOverrideSpell, id))
-        if overrideID and overrideID > 0 then id = overrideID end
+    if spell.slot then
+        duration = apiCall(book.GetSpellBookItemCooldownDuration, spell.slot, bank, settings.ignoreGCD)
+        if setDuration(cooldown, duration) then return end
     end
     duration = apiCall(C_Spell.GetSpellCooldownDuration, id, settings.ignoreGCD)
     if setDuration(cooldown, duration) then return end
-    local info = apiCall(book.GetSpellBookItemCooldown, spell.slot, bank)
+    local info
+    if spell.slot then info = apiCall(book.GetSpellBookItemCooldown, spell.slot, bank) end
     if not readable(info) or not info then info = apiCall(C_Spell.GetSpellCooldown, id) end
     if not setSpellTimerFromNumbers(cooldown, info, settings.ignoreGCD) then cooldown:Clear() end
 end
@@ -396,11 +445,7 @@ local function createIcon(parent, auraIcon)
     icon:SetScript("OnEnter", function(self)
         if not self.entry then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        if self.entry.item then
-            GameTooltip:SetItemByID(self.entry.id)
-        else
-            GameTooltip:SetSpellByID(self.entry.id)
-        end
+        GameTooltip:SetSpellByID(self.entry.id)
         if self.unknown then
             GameTooltip:AddLine("Status unavailable", 0.8, 0.8, 0.8)
         elseif self.missing:IsShown() then
@@ -577,10 +622,9 @@ local function layoutAuras()
         icon:SetMouseClickEnabled(item.filter == "HARMFUL")
         icon.texture:SetTexture(item.entry.icon)
         icon.unknown = item.unknown
-        icon.texture:SetDesaturated(item.missing == true or item.unknown == true)
-        icon:SetAlpha((item.missing or item.unknown) and 0.55 or 1)
-        icon.missing:SetText(item.unknown and "?" or "!")
-        icon.missing:SetShown(item.missing == true or item.unknown == true)
+        icon.texture:SetDesaturated(item.missing == true)
+        icon:SetAlpha(item.missing and 0.55 or item.unknown and unknownAlpha or 1)
+        icon.missing:SetShown(item.missing == true)
         applyTimerStyle(icon.cooldown, settings, item.override)
         updateAuraTimer(icon, settings, item.aura)
         icon:Show()
@@ -594,7 +638,7 @@ end
 
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
-local rankTimers = setmetatable({}, { __mode = "k" })
+local spellTimers = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
 local function updateRange(icon)
@@ -603,26 +647,6 @@ local function updateRange(icon)
         icon.texture:SetVertexColor(1, 0.25, 0.25)
     else
         icon.texture:SetVertexColor(1, 1, 1)
-    end
-end
-
-local function updateConjured(icon, family)
-    local id, count = Addon.GetConjuredItem(family)
-    if count == 0 and icon.family == family and icon.entry then id = icon.entry.id end
-    icon.family = family
-    icon.entry = { id = id, item = true }
-    icon.texture:SetTexture(C_Item.GetItemIconByID(id) or unknownIcon)
-    icon.texture:SetDesaturated(count == 0)
-    icon.count:SetText(count)
-    local info = apiCall(C_Spell.GetItemCooldown, id)
-    if not setSpellTimerFromNumbers(icon.cooldown, info, false) then
-        local ok, start, duration, enabled = pcall(C_Item.GetItemCooldown, id)
-        start, duration = number(start), number(duration)
-        if ok and readable(enabled) and enabled and start and duration and start > 0 and duration > 0 then
-            icon.cooldown:SetCooldown(start, duration)
-        else
-            icon.cooldown:Clear()
-        end
     end
 end
 
@@ -656,7 +680,7 @@ local function updateExtraRow(frame, anchor, entries, render)
 end
 
 local function updateExtras()
-    local essential, utility = _G.EssentialCooldownViewer, _G.UtilityCooldownViewer
+    local essential = _G.EssentialCooldownViewer
     local existing = {}
     if essential and essential.itemFramePool then
         for item in essential.itemFramePool:EnumerateActive() do
@@ -678,13 +702,6 @@ local function updateExtras()
         updateRange(icon)
         updateSpellTimer(icon, db.cooldowns)
     end)
-    local items = {}
-    for _, family in ipairs(conjuredItems) do
-        if db.cooldowns.items[family.name] then items[#items + 1] = family end
-    end
-    local itemAnchor = utility and utility:IsVisible() and utility or essential
-    if itemAnchor == essential and essentialExtras:IsShown() then itemAnchor = essentialExtras end
-    updateExtraRow(itemExtras, itemAnchor, items, updateConjured)
 end
 
 
@@ -696,31 +713,36 @@ local function viewerOverride(item, key, id)
     return nativeOverride or Addon.GetIconOverride(key, id, filter)
 end
 
-local unknownLabels = setmetatable({}, { __mode = "k" })
+local dimmedItems = setmetatable({}, { __mode = "k" })
 
-local function showUnknown(item, parent, unknown)
-    local label = unknownLabels[item]
-    if unknown and not label then
-        label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        label:SetText("?")
-        unknownLabels[item] = label
-    end
-    if label then
-        if unknown and (label:GetParent() ~= parent or label:GetNumPoints() == 0) then
-            label:SetParent(parent)
-            label:ClearAllPoints()
-            label:SetPoint("TOPLEFT", parent, "TOPLEFT", 2, -2)
+local function dimUnknown(item, unknown)
+    local previous = dimmedItems[item]
+    if not unknown and not previous then return end
+    local alpha = number(item:GetAlpha())
+    if unknown then
+        if alpha and (not previous or alpha ~= previous.dimmed) then
+            local dimmed = alpha * unknownAlpha
+            item:SetAlpha(dimmed)
+            dimmedItems[item] = { original = alpha, dimmed = number(item:GetAlpha()) }
         end
-        label:SetShown(unknown)
+    else
+        if alpha and alpha == previous.dimmed then item:SetAlpha(previous.original) end
+        dimmedItems[item] = nil
     end
 end
 
 local function updateNativeIcon(item, viewer, key)
-    local id = number(apiCall(item.GetSpellID, item)) or number(apiCall(item.GetBaseSpellID, item))
+    local baseID = number(apiCall(item.GetBaseSpellID, item))
+    local id = number(apiCall(item.GetSpellID, item)) or baseID
     local override = id and not viewer:IsEditing() and viewerOverride(item, key, id)
     local rank = override and spellsByID[override.rankID]
-    local timer = rankTimers[item]
-    local nativeCooldown = rank and item:GetCooldownFrame()
+    local spell = rank
+    if not spell and key == "cooldowns" and override and override.spellCooldownOnly and baseID then
+        -- The displayed spell ID can be the target aura while it is active.
+        spell = spellsByID[baseID] or { id = baseID }
+    end
+    local timer = spellTimers[item]
+    local nativeCooldown = spell and item:GetCooldownFrame()
     if nativeCooldown then
         if not timer then
             local frame = CreateFrame("Frame", nil, item)
@@ -740,7 +762,7 @@ local function updateNativeIcon(item, viewer, key)
             local count = countFrame:CreateFontString(nil, "OVERLAY", font)
             count:SetPoint("BOTTOMRIGHT", -2, 2)
             timer = { frame = frame, cooldown = cooldown, count = count }
-            rankTimers[item] = timer
+            spellTimers[item] = timer
         end
         if not timer.nativeCooldown then
             timer.nativeCooldown = nativeCooldown
@@ -753,7 +775,7 @@ local function updateNativeIcon(item, viewer, key)
                 chargeFrame:SetAlpha(0)
             end
         end
-        timer.entry = rank
+        timer.entry = spell
         applyTimerStyle(timer.cooldown, db[key], override)
         updateSpellTimer(timer, db[key])
         timer.frame:Show()
@@ -768,18 +790,18 @@ local function updateNativeIcon(item, viewer, key)
     if mode == "ready" or mode == "missing" then
         local show
         if mode == "ready" then
-            show = isSpellReady(rank and rank.id or id)
+            show = isSpellReady(spell and spell.id or baseID or id)
         else
             show = missingForOverride(override.auraID or id, override)
             local activeID = number(apiCall(item.GetAuraSpellID, item))
             if activeID and activeAuras.HELPFUL[activeID] then show = false end
         end
-        local unknown = show == nil and InCombatLockdown()
-        showUnknown(item, nativeCooldown and timer.frame or item, unknown)
+        local unknown = mode == "missing" and show == nil and InCombatLockdown()
+        dimUnknown(item, unknown)
         filteredItems[item] = true
         item:SetShown(show == true or unknown == true)
     else
-        showUnknown(item, item, false)
+        dimUnknown(item, false)
         if filteredItems[item] then
             filteredItems[item] = nil
             local shown = apiCall(item.ShouldBeShown, item)
@@ -874,6 +896,7 @@ local function styleViewer(viewer, key)
         end
         styleViewerItem(item, viewer, key)
         updateNativeIcon(item, viewer, key)
+        if key == "cooldowns" then refreshManaGemIcon(item, "RefreshIconDesaturation") end
     end
 end
 
@@ -965,8 +988,7 @@ local function refresh()
     pending = {}
     if update.catalog then scanSpellbook() end
     if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
-    if update.catalog or update.cooldowns or update.items then updateExtras() end
-    if update.bags and Addon.RefreshCategoryButtons then Addon.RefreshCategoryButtons() end
+    if update.catalog or update.cooldowns then updateExtras() end
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
@@ -977,6 +999,7 @@ local function refresh()
         attachBarStacks()
         Addon.AttachOptions()
     end
+    if update.blizzard or update.bags then refreshManaGemAvailability() end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
 end
 
@@ -984,8 +1007,6 @@ local driver = CreateFrame("Frame")
 driver:RegisterEvent("ADDON_LOADED")
 driver:RegisterEvent("PLAYER_LOGIN")
 driver:RegisterEvent("BAG_UPDATE_DELAYED")
-driver:RegisterEvent("BAG_UPDATE_COOLDOWN")
-driver:RegisterEvent("PLAYER_TARGET_CHANGED")
 for event in pairs(catalogEvents) do driver:RegisterEvent(event) end
 driver:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 driver:RegisterEvent("SPELL_UPDATE_CHARGES")
@@ -997,6 +1018,7 @@ driver:SetScript("OnEvent", function(_, event, name)
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
         db = BetterForeverCooldownsDB
         fillDefaults(db, defaults)
+        db.cooldowns.items = nil
         migrateBuffAlternatives()
         db.cooldowns.showAll, db.cooldowns.allRanks = nil, nil
         db.auras.showMissing = nil
@@ -1010,7 +1032,6 @@ driver:SetScript("OnEvent", function(_, event, name)
         db.cooldowns.entries = nil
         auraSection = createSection()
         essentialExtras = createSection()
-        itemExtras = createSection()
         local elapsed = 0
         essentialExtras:SetScript("OnUpdate", function(self, delta)
             elapsed = elapsed + delta
@@ -1030,11 +1051,10 @@ driver:SetScript("OnEvent", function(_, event, name)
         pending.blizzard = true
     elseif catalogEvents[event] then
         pending.catalog = true
+    elseif event == "BAG_UPDATE_DELAYED" then
+        pending.bags = true
     elseif event == "UNIT_AURA" then
         pending.auras = true
-    elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_TARGET_CHANGED" then
-        pending.items = true
-        if event == "BAG_UPDATE_DELAYED" then pending.bags = true end
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         pending.cooldowns, pending.auras = true, true
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_CHARGES" then
