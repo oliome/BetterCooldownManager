@@ -263,12 +263,13 @@ local function makePicker(manager)
             end
             if mouseButton == "RightButton" then
                 MenuUtil.CreateContextMenu(self, function(_, root)
-                    if filter == "HELPFUL" then missingToggle(root, id, id) end
-                    iconMenu(root, section, id, filter)
+                    local menu = root:CreateButton("Better CDM")
+                    if filter == "HELPFUL" then missingToggle(menu, id, id) end
+                    iconMenu(menu, section, id, filter)
                     if Addon.FindPin(section, id, filter) then
-                        root:CreateDivider()
-                        root:CreateButton("Move earlier", function() movePin(section, id, filter, -1) end)
-                        root:CreateButton("Move later", function() movePin(section, id, filter, 1) end)
+                        menu:CreateDivider()
+                        menu:CreateButton("Move earlier", function() movePin(section, id, filter, -1) end)
+                        menu:CreateButton("Move later", function() movePin(section, id, filter, 1) end)
                     end
                 end)
                 return
@@ -447,6 +448,7 @@ local function itemMenu(owner, root)
     if issecretvalue and issecretvalue(id) then return end
     if type(id) ~= "number" then return end
     root:CreateDivider()
+    local menu = root:CreateButton("Better CDM")
     local section, filter = aura and "auras" or "cooldowns", aura and "HELPFUL" or nil
     local displayID = owner:GetSpellID()
     if issecretvalue and issecretvalue(displayID) then displayID = nil end
@@ -460,7 +462,7 @@ local function itemMenu(owner, root)
     if spell then
         local ranks = Addon.GetRanks(id, displayID)
         if #ranks > 1 then
-            local rank = root:CreateButton("Rank")
+            local rank = menu:CreateButton("Rank")
             rank:CreateRadio("Default", function() return current("rankID") == nil end, function()
                 set("rankID", nil)
             end)
@@ -470,17 +472,17 @@ local function itemMenu(owner, root)
                 end)
             end
         end
-        root:CreateCheckbox("Show only when ready", function() return current("visibility") == "ready" end, function()
+        menu:CreateCheckbox("Show only when ready", function() return current("visibility") == "ready" end, function()
             local mode = current("visibility") ~= "ready" and "ready" or nil
             set("visibility", mode)
         end)
     elseif displayID then
-        missingToggle(root, id, displayID)
+        missingToggle(menu, id, displayID)
     end
-    iconMenu(root:CreateButton("Icon display"), section, id, filter)
+    iconMenu(menu:CreateButton("Icon display"), section, id, filter)
     if aura then
         if type(displayID) == "number" then
-            root:CreateButton("Track on yourself…", function()
+            menu:CreateButton("Track on yourself…", function()
                 openPicker("auras", "HELPFUL")
                 if picker and picker:IsVisible() then picker.search:SetText(tostring(displayID)) end
             end)
