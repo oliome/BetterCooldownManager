@@ -83,6 +83,7 @@ local function scanSpellbook()
                         local entry = {
                             id = id, name = name, icon = icon, slot = slot,
                             rank = rank,
+                            skillLine = line,
                             level = book.GetSpellBookItemLevelLearned(slot, bank),
                             lowerRank = book.IsSpellBookItemLowRank(slot, bank),
                         }
@@ -140,6 +141,19 @@ function Addon.GetEntryDetails(section, id)
     return { id = id, name = name, icon = icon }
 end
 
+function Addon.GetRanks(id, displayID)
+    local seed = spellsByID[displayID] or spellsByID[id]
+    local name = seed and seed.name or spellMetadata(displayID or id)
+    local ranks = {}
+    for _, spell in ipairs(spells) do
+        if spell.name == name and spell.rank and spell.rank ~= ""
+            and (not seed or seed.skillLine == spell.skillLine) then
+            ranks[#ranks + 1] = spell
+        end
+    end
+    return ranks
+end
+
 function Addon.FindPin(section, id, filter)
     for index, entry in ipairs(db[section].entries) do
         if entry.id == id and entry.filter == filter then return index, entry end
@@ -194,6 +208,33 @@ local function setDuration(cooldown, duration)
     if readable(duration) and duration and cooldown.SetCooldownFromDurationObject then
         local ok = pcall(cooldown.SetCooldownFromDurationObject, cooldown, duration, true)
         return ok
+    end
+    return false
+end
+
+local function isSpellReady(id)
+    local charges = apiCall(C_Spell.GetSpellCharges, id)
+    if not readable(charges) then return false end
+    if charges then
+        local current = number(charges.currentCharges)
+        return current ~= nil and current > 0
+    end
+    local duration = apiCall(C_Spell.GetSpellCooldownDuration, id, true)
+    if readable(duration) and (type(duration) == "table" or type(duration) == "userdata") then
+        local remaining = number(apiCall(duration.GetRemainingDuration, duration))
+        if remaining ~= nil then return remaining <= 0 end
+    end
+    local info = apiCall(C_Spell.GetSpellCooldown, id)
+    if readable(info) and info then
+        local start, seconds = number(info.startTime), number(info.duration)
+        if start == 0 or seconds == 0 then return true end
+        local gcd = apiCall(C_Spell.GetSpellCooldown, 61304)
+        if start and seconds and readable(gcd) and gcd then
+            local gcdStart, gcdSeconds = number(gcd.startTime), number(gcd.duration)
+            if gcdStart and gcdSeconds then
+                return (start == gcdStart and seconds == gcdSeconds) or start + seconds <= GetTime()
+            end
+        end
     end
     return false
 end
@@ -290,7 +331,7 @@ local function updateAuraTimer(icon, settings, aura)
     end
 end
 
-local function createIcon(parent)
+local function createIcon(parent, onCooldownDone)
     local icon = CreateFrame("Frame", nil, parent)
     local border = icon:CreateTexture(nil, "BACKGROUND")
     border:SetAllPoints()
@@ -305,6 +346,7 @@ local function createIcon(parent)
     icon.cooldown:SetDrawEdge(false)
     icon.cooldown:SetMinimumCountdownDuration(0)
     icon.cooldown:SetCountdownAbbrevThreshold(600)
+    if onCooldownDone then icon.cooldown:SetScript("OnCooldownDone", onCooldownDone) end
     local overlay = CreateFrame("Frame", nil, icon)
     overlay:SetAllPoints()
     overlay:SetFrameLevel(icon.cooldown:GetFrameLevel() + 1)
@@ -346,8 +388,17 @@ local function visibleSpells(key)
         local viewer = _G[name]
         if viewer and viewer:IsVisible() and not viewer:IsEditing() and viewer.itemFramePool then
             for item in viewer.itemFramePool:EnumerateActive() do
-                local id = item:IsVisible() and number(apiCall(item.GetSpellID, item))
-                if id then visible[id] = true end
+                local id = number(apiCall(item.GetSpellID, item))
+                local baseID = number(apiCall(item.GetBaseSpellID, item))
+                local override = db[key].overrides[baseID or id]
+                if key == "cooldowns" or item:IsVisible() or (override and override.visibility == "missing") then
+                    if id then visible[id] = true end
+                    if override and override.auraID then visible[override.auraID] = true end
+                    if override and override.rankID then visible[override.rankID] = true end
+                end
+                if baseID and key == "cooldowns" then
+                    visible[baseID] = true
+                end
             end
         end
     end
@@ -455,6 +506,8 @@ end
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
 local missingMarkers = setmetatable({}, { __mode = "k" })
+local rankIcons = setmetatable({}, { __mode = "k" })
+local filteredItems = setmetatable({}, { __mode = "k" })
 
 local function updateMissingMarker(item, viewer, id)
     local marker = missingMarkers[item]
@@ -475,6 +528,47 @@ local function viewerOverride(item, key, id)
     local baseID = number(apiCall(item.GetBaseSpellID, item))
     local nativeOverride = settings.overrides[baseID or id]
     return nativeOverride or Addon.GetIconOverride(key, id, filter)
+end
+
+local function updateNativeIcon(item, viewer, key)
+    local id = number(apiCall(item.GetSpellID, item))
+    local override = id and not viewer:IsEditing() and viewerOverride(item, key, id)
+    local rank = override and spellsByID[override.rankID]
+    local icon = rankIcons[item]
+    if rank then
+        if not icon then
+            icon = createIcon(item, function() updateNativeIcon(item, viewer, key) end)
+            icon:SetAllPoints(item)
+            icon:SetFrameLevel(item:GetFrameLevel() + 8)
+            rankIcons[item] = icon
+        end
+        icon.entry = rank
+        icon.texture:SetTexture(rank.icon)
+        icon.missing:Hide()
+        applyTimerStyle(icon.cooldown, db[key], override)
+        updateSpellTimer(icon, db[key])
+        icon:Show()
+    elseif icon then
+        icon:Hide()
+    end
+
+    local mode = override and override.visibility
+    if mode == "ready" or mode == "missing" then
+        local show
+        if mode == "ready" then
+            show = isSpellReady(rank and rank.id or id)
+        else
+            show = isMissingBuff(override.auraID or id)
+            local activeID = number(apiCall(item.GetAuraSpellID, item))
+            if activeID and activeAuras.HELPFUL[activeID] then show = false end
+        end
+        filteredItems[item] = true
+        item:SetShown(show)
+    elseif filteredItems[item] then
+        filteredItems[item] = nil
+        local shown = apiCall(item.ShouldBeShown, item)
+        if readable(shown) and type(shown) == "boolean" then item:SetShown(shown) end
+    end
 end
 
 local function styleStackCount(item, viewer, key)
@@ -549,9 +643,32 @@ local function styleViewer(viewer, key)
             if item[countMethod] then
                 hooksecurefunc(item, countMethod, function(self) styleStackCount(self, viewer, key) end)
             end
+            if item.UpdateShownState then
+                hooksecurefunc(item, "UpdateShownState", function(self)
+                    updateNativeIcon(self, viewer, key)
+                end)
+            end
+            local cooldown = item:GetCooldownFrame()
+            if cooldown then
+                cooldown:HookScript("OnCooldownDone", function()
+                    updateNativeIcon(item, viewer, key)
+                end)
+            end
             itemHooks[item] = true
         end
         styleViewerItem(item, viewer, key)
+        updateNativeIcon(item, viewer, key)
+    end
+end
+
+local function updateNativeIcons(key)
+    for _, name in ipairs(viewerNames[key]) do
+        local viewer = _G[name]
+        if viewer and viewer:IsVisible() and viewer.itemFramePool then
+            for item in viewer.itemFramePool:EnumerateActive() do
+                updateNativeIcon(item, viewer, key)
+            end
+        end
     end
 end
 
@@ -615,9 +732,11 @@ local function refresh()
             if icon.entry then updateSpellTimer(icon, db.cooldowns) end
         end
     end
+    if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
     if update.auras then
         scanAuras()
         layoutSection("auras")
+        updateNativeIcons("auras")
         local viewer = _G.BuffIconCooldownViewer
         if viewer and viewer:IsVisible() and viewer.itemFramePool then
             for item in viewer.itemFramePool:EnumerateActive() do

@@ -302,13 +302,45 @@ local function itemMenu(owner, root)
     if type(id) ~= "number" then return end
     root:CreateDivider()
     local section, filter = aura and "auras" or "cooldowns", aura and "HELPFUL" or nil
+    local displayID = owner:GetSpellID()
+    if issecretvalue and issecretvalue(displayID) then displayID = nil end
+    local function current(key)
+        local override = Addon.GetIconOverride(section, id, filter)
+        if override then return override[key] end
+    end
+    local function set(key, value)
+        Addon.SetIconOverride(section, id, filter, key, value)
+    end
+    if spell then
+        local ranks = Addon.GetRanks(id, displayID)
+        if #ranks > 1 then
+            local rank = root:CreateButton("Rank")
+            rank:CreateRadio("Default", function() return current("rankID") == nil end, function()
+                set("rankID", nil)
+            end)
+            for _, entry in ipairs(ranks) do
+                rank:CreateRadio(entry.rank, function() return current("rankID") == entry.id end, function()
+                    set("rankID", entry.id)
+                end)
+            end
+        end
+        root:CreateCheckbox("Show only when ready", function() return current("visibility") == "ready" end, function()
+            local mode = current("visibility") ~= "ready" and "ready" or nil
+            set("visibility", mode)
+        end)
+    elseif displayID then
+        root:CreateCheckbox("Show only when missing", function() return current("visibility") == "missing" end, function()
+            local mode = current("visibility") ~= "missing" and "missing" or nil
+            if mode then set("auraID", displayID) end
+            set("visibility", mode)
+        end)
+    end
     iconMenu(root:CreateButton("Icon display"), section, id, filter)
     if aura then
-        local auraID = owner:GetSpellID()
-        if (not issecretvalue or not issecretvalue(auraID)) and type(auraID) == "number" then
+        if type(displayID) == "number" then
             root:CreateButton("Track on yourself…", function()
                 openPicker("auras", "HELPFUL")
-                if picker and picker:IsVisible() then picker.search:SetText(tostring(auraID)) end
+                if picker and picker:IsVisible() then picker.search:SetText(tostring(displayID)) end
             end)
         end
     end
