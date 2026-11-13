@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Better Forever Cooldowns
-## Notes: Customize Blizzard cooldown icons and track learned abilities, buffs, and debuffs.
-## Version: 0.5.13
+## Notes: Add cooldown dividers and choose spell ranks and visibility rules for Blizzard cooldowns and buffs.
+## Version: 0.6.1
 ## Dependencies: Blizzard_CooldownViewer
 ## SavedVariablesPerCharacter: BetterForeverCooldownsDB
 
