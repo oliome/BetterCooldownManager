@@ -158,6 +158,14 @@ end
 
 local trackedDisplays = {}
 local customRows = {}
+
+function Addon.RefreshTrackedBuffIcons(textures)
+    for _, row in ipairs(customRows.auras or {}) do
+        local texture = textures[row.entryID]
+        if texture and row:IsVisible() then row.icon:SetTexture(texture) end
+    end
+end
+
 local refreshTrackedEntries
 local cooldownSections = { { "Essential", "essential" }, { "Utility", "utility" }, { "Items", "items" } }
 local dragPreview

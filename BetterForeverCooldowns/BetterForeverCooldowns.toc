@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Better Forever Cooldowns
 ## Notes: Add spells, items, and buffs to Blizzard's Cooldown Manager.
-## Version: 0.9.6
+## Version: 0.9.7
 ## Dependencies: Blizzard_CooldownViewer
 ## SavedVariablesPerCharacter: BetterForeverCooldownsDB
 
