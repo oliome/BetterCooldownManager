@@ -153,6 +153,7 @@ function Addon.UpdateChoices()
             row.mark:SetText(tracked and "✓" or "")
         end
     end
+    picker.empty:SetText(section == "alternatives" and not picker.trackedOnly and "No matching buffs in Not Displayed" or "No matching entries")
     picker.empty:SetShown(#matches == 0)
     picker.pageText:SetText(("%d / %d"):format(picker.page, pages))
     picker.previous:SetEnabled(picker.page > 1)
@@ -167,17 +168,9 @@ local function addAuraID()
         picker.status:SetText("Enter the effect's aura spell ID.")
         return
     end
-    if picker.section == "alternatives" then
-        if id == picker.reminderID or id == picker.auraID then
-            picker.status:SetText("This buff is already checked by the reminder.")
-            return
-        end
-        Addon.SetBuffAlternative(picker.reminderID, picker.auraID, id, true)
-    else
-        Addon.Pin(picker.section, id, picker.filter)
-    end
+    Addon.Pin(picker.section, id, picker.filter)
     picker.search:SetText("")
-    picker.status:SetText(picker.section == "alternatives" and "Alternative added. View it under Selected." or "Aura added. View it under Tracked.")
+    picker.status:SetText("Aura added. View it under Tracked.")
 end
 
 local function movePin(section, id, filter, offset)
@@ -215,13 +208,17 @@ local function makePicker(manager)
         Addon.UpdateChoices()
     end)
     picker.search:SetScript("OnEnterPressed", function(self)
-        if picker.filter then addAuraID() end
+        if picker.section == "auras" then addAuraID() end
         self:ClearFocus()
     end)
     picker.mode = button(picker, "Tracked", 90, function(self)
         picker.trackedOnly = not picker.trackedOnly
         picker.page = 1
-        self:SetText(picker.trackedOnly and "Browse" or picker.section == "alternatives" and "Selected" or "Tracked")
+        if picker.section == "alternatives" then
+            self:SetText(picker.trackedOnly and "Not Displayed" or "Selected")
+        else
+            self:SetText(picker.trackedOnly and "Browse" or "Tracked")
+        end
         Addon.UpdateChoices()
     end)
     picker.mode:SetPoint("TOPRIGHT", -14, -32)
@@ -332,8 +329,8 @@ openPicker = function(section, filter, reminderID, auraID)
         or section == "range" and "Essential range abilities"
         or filter == "HELPFUL" and "Add self buffs" or "Add self debuffs"
     picker.TitleText:SetText(title)
-    picker.addID:SetShown(section ~= "range")
-    local hint = section == "alternatives" and "Any selected buff suppresses this reminder."
+    picker.addID:SetShown(section == "auras")
+    local hint = section == "alternatives" and "Pick a buff from Not Displayed to suppress this reminder."
         or section == "range" and "Click to toggle an Essential range icon."
         or "Click to toggle tracking. Right-click for display."
     picker.hint:SetText(hint)

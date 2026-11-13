@@ -474,16 +474,13 @@ function Addon.GetBuffAlternatives(id, auraID, selectedOnly)
         entries[#entries + 1] = Addon.GetEntryDetails("auras", spellID)
     end
     local override = Addon.GetIconOverride("auras", id, "HELPFUL")
-    for spellID in pairs(override and override.alternatives or {}) do add(spellID) end
-    if not selectedOnly then
-        for spellID in pairs(activeAuras.HELPFUL) do add(spellID) end
-        for _, pin in ipairs(db.auras.entries) do
-            if pin.filter == "HELPFUL" then add(pin.id) end
-        end
+    if selectedOnly then
+        for spellID in pairs(override and override.alternatives or {}) do add(spellID) end
+    else
         local manager = _G.CooldownViewerSettings
         if manager and manager.categoryPool then
             for display in manager.categoryPool:EnumerateActive() do
-                if display:GetCategoryObject():GetCategory() == Enum.CooldownViewerCategory.TrackedBuff then
+                if display:GetCategoryObject():GetCategory() == Enum.CooldownViewerCategory.HiddenPassive then
                     for item in display.itemPool:EnumerateActive() do
                         add(number(apiCall(item.GetSpellID, item)))
                     end
