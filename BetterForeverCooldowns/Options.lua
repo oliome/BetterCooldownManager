@@ -47,20 +47,32 @@ local function displayMenu(menu, section)
     addToggle(menu, "Countdown numbers", section, "numbers")
     addToggle(menu, "Radial swipe", section, "swipe")
     addToggle(menu, section == "auras" and "Show stacks" or "Show charges", section, "stacks")
-    if section == "auras" then
-        addToggle(menu, "Show missing tracked buffs", section, "showMissing")
-    else
-        addToggle(menu, "Ignore global cooldown on added spells", section, "ignoreGCD")
+    if section == "cooldowns" then
+        addToggle(menu, "Ignore global cooldown on selected ranks", section, "ignoreGCD")
     end
     menu:CreateDivider()
     menu:CreateButton("Countdown color…", function() chooseColor(section) end)
     addChoices(menu, "Countdown size", section, "fontSize", { {"Small", 12}, {"Medium", 17}, {"Large", 22}, {"Extra large", 28} })
     addChoices(menu, "Countdown decimals", section, "decimals", { {"Off", 0}, {"Under 3 seconds", 3}, {"Under 5 seconds", 5}, {"Under 10 seconds", 10} })
-    local layout = menu:CreateButton("Added icon layout")
-    addChoices(layout, "Size", section, "size", { {"28", 28}, {"38", 38}, {"48", 48}, {"60", 60} })
-    addChoices(layout, "Spacing", section, "gap", { {"Tight", 2}, {"Normal", 4}, {"Wide", 8} })
-    addChoices(layout, "Icons per row", section, "columns", { {"6", 6}, {"8", 8}, {"12", 12}, {"16", 16} })
-    addChoices(layout, "Alignment", section, "alignment", { {"Left", "LEFT"}, {"Center", "CENTER"}, {"Right", "RIGHT"} })
+    if section == "auras" then
+        local layout = menu:CreateButton("Added icon layout")
+        addChoices(layout, "Size", section, "size", { {"28", 28}, {"38", 38}, {"48", 48}, {"60", 60} })
+        addChoices(layout, "Spacing", section, "gap", { {"Tight", 2}, {"Normal", 4}, {"Wide", 8} })
+        addChoices(layout, "Icons per row", section, "columns", { {"6", 6}, {"8", 8}, {"12", 12}, {"16", 16} })
+        addChoices(layout, "Alignment", section, "alignment", { {"Left", "LEFT"}, {"Center", "CENTER"}, {"Right", "RIGHT"} })
+    end
+end
+
+local function missingToggle(menu, id, auraID)
+    local function checked()
+        local override = Addon.GetIconOverride("auras", id, "HELPFUL")
+        return override and override.visibility == "missing"
+    end
+    menu:CreateCheckbox("Show only when missing", checked, function()
+        local mode = not checked() and "missing" or nil
+        if mode then Addon.SetIconOverride("auras", id, "HELPFUL", "auraID", auraID) end
+        Addon.SetIconOverride("auras", id, "HELPFUL", "visibility", mode)
+    end)
 end
 
 local function iconMenu(menu, section, id, filter)
@@ -99,7 +111,7 @@ function Addon.UpdateChoices()
             if pin.filter == filter then entries[#entries + 1] = Addon.GetEntryDetails(section, pin.id) end
         end
     else
-        entries = Addon.GetChoices(section, filter, settings.allRanks)
+        entries = Addon.GetAuraChoices(filter)
     end
     local matches = {}
     for _, entry in ipairs(entries) do
@@ -210,6 +222,7 @@ local function makePicker(manager)
             local section, filter = picker.section, picker.filter
             if mouseButton == "RightButton" then
                 MenuUtil.CreateContextMenu(self, function(_, root)
+                    if filter == "HELPFUL" then missingToggle(root, id, id) end
                     iconMenu(root, section, id, filter)
                     if Addon.FindPin(section, id, filter) then
                         root:CreateDivider()
@@ -267,8 +280,7 @@ local function openPicker(section, filter)
     picker.section, picker.filter = section, filter
     picker.trackedOnly, picker.page = false, 1
     picker.mode:SetText("Tracked")
-    picker.TitleText:SetText(filter == "HELPFUL" and "Add self buffs" or filter == "HARMFUL" and "Add self debuffs" or "Add learned abilities")
-    picker.addID:SetShown(filter ~= nil)
+    picker.TitleText:SetText(filter == "HELPFUL" and "Add self buffs" or "Add self debuffs")
     picker.search:SetText("")
     picker.status:SetText("")
     picker:Show()
@@ -277,11 +289,7 @@ end
 
 local function settingsMenu(_, root)
     root:CreateDivider()
-    local spells = root:CreateButton("Spells")
-    addToggle(spells, "Show all learned abilities", "cooldowns", "showAll")
-    addToggle(spells, "Show all learned ranks", "cooldowns", "allRanks")
-    spells:CreateButton("Add abilities or ranks…", function() openPicker("cooldowns") end)
-    displayMenu(spells:CreateButton("Cooldown icon display"), "cooldowns")
+    displayMenu(root:CreateButton("Cooldown icon display"), "cooldowns")
     local auras = root:CreateButton("Self auras")
     auras:CreateButton("Add self buffs…", function() openPicker("auras", "HELPFUL") end)
     auras:CreateButton("Add self debuffs…", function() openPicker("auras", "HARMFUL") end)
@@ -329,11 +337,7 @@ local function itemMenu(owner, root)
             set("visibility", mode)
         end)
     elseif displayID then
-        root:CreateCheckbox("Show only when missing", function() return current("visibility") == "missing" end, function()
-            local mode = current("visibility") ~= "missing" and "missing" or nil
-            if mode then set("auraID", displayID) end
-            set("visibility", mode)
-        end)
+        missingToggle(root, id, displayID)
     end
     iconMenu(root:CreateButton("Icon display"), section, id, filter)
     if aura then

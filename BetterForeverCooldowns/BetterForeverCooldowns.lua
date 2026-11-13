@@ -3,7 +3,7 @@ local db
 local spells, spellsByID = {}, {}
 local activeAuras = { HELPFUL = {}, HARMFUL = {} }
 local auraListComplete = {}
-local sections = {}
+local auraSection
 local unknownIcon = 134400
 local viewerNames = {
     cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
@@ -13,13 +13,12 @@ local viewerNames = {
 local defaults = {
     cooldowns = {
         numbers = true, swipe = true, stacks = true, ignoreGCD = true,
-        showAll = false, allRanks = false, styleBlizzard = true,
+        styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
-        size = 38, gap = 4, columns = 12, alignment = "CENTER",
-        entries = {}, overrides = {},
+        overrides = {},
     },
     auras = {
-        numbers = true, swipe = true, stacks = true, showMissing = true, styleBlizzard = true,
+        numbers = true, swipe = true, stacks = true, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
         size = 38, gap = 4, columns = 12, alignment = "CENTER",
         entries = {}, overrides = {},
@@ -119,19 +118,13 @@ function Addon.GetSettings(section)
     return db[section]
 end
 
-function Addon.GetChoices(section, filter, allRanks)
+function Addon.GetAuraChoices(filter)
     local choices = {}
-    if section == "cooldowns" then
-        for _, entry in ipairs(spells) do
-            if allRanks or not entry.lowerRank then choices[#choices + 1] = entry end
-        end
-    else
-        for id in pairs(activeAuras[filter]) do
-            local name, icon = spellMetadata(id)
-            choices[#choices + 1] = { id = id, name = name, icon = icon, filter = filter }
-        end
-        table.sort(choices, sortEntries)
+    for id in pairs(activeAuras[filter]) do
+        local name, icon = spellMetadata(id)
+        choices[#choices + 1] = { id = id, name = name, icon = icon }
     end
+    table.sort(choices, sortEntries)
     return choices
 end
 
@@ -155,13 +148,14 @@ function Addon.GetRanks(id, displayID)
 end
 
 function Addon.FindPin(section, id, filter)
+    if section ~= "auras" then return end
     for index, entry in ipairs(db[section].entries) do
         if entry.id == id and entry.filter == filter then return index, entry end
     end
 end
 
 function Addon.Pin(section, id, filter)
-    if section == "cooldowns" and not spellsByID[id] then return false end
+    if section ~= "auras" then return false end
     if not Addon.FindPin(section, id, filter) then
         table.insert(db[section].entries, { id = id, filter = filter })
         Addon.ApplySettings()
@@ -375,53 +369,19 @@ local function createSection()
     return frame
 end
 
-local function visibleViewer(key)
-    for index = #viewerNames[key], 1, -1 do
-        local viewer = _G[viewerNames[key][index]]
-        if viewer and viewer:IsVisible() and not viewer:IsEditing() then return viewer end
-    end
-end
-
-local function visibleSpells(key)
+local function visibleBuffs(viewer)
     local visible = {}
-    for _, name in ipairs(viewerNames[key]) do
-        local viewer = _G[name]
-        if viewer and viewer:IsVisible() and not viewer:IsEditing() and viewer.itemFramePool then
-            for item in viewer.itemFramePool:EnumerateActive() do
-                local id = number(apiCall(item.GetSpellID, item))
-                local baseID = number(apiCall(item.GetBaseSpellID, item))
-                local override = db[key].overrides[baseID or id]
-                if key == "cooldowns" or item:IsVisible() or (override and override.visibility == "missing") then
-                    if id then visible[id] = true end
-                    if override and override.auraID then visible[override.auraID] = true end
-                    if override and override.rankID then visible[override.rankID] = true end
-                end
-                if baseID and key == "cooldowns" then
-                    visible[baseID] = true
-                end
-            end
+    if not viewer.itemFramePool then return visible end
+    for item in viewer.itemFramePool:EnumerateActive() do
+        local id = number(apiCall(item.GetSpellID, item))
+        local baseID = number(apiCall(item.GetBaseSpellID, item))
+        local override = db.auras.overrides[baseID or id]
+        if item:IsVisible() or (override and override.visibility == "missing") then
+            if id then visible[id] = true end
+            if override and override.auraID then visible[override.auraID] = true end
         end
     end
     return visible
-end
-
-local function cooldownEntries(settings, visible)
-    local entries, pinned = {}, {}
-    for _, pin in ipairs(settings.entries) do
-        local spell = spellsByID[pin.id]
-        if spell and not visible[pin.id] then
-            entries[#entries + 1] = { entry = spell, override = Addon.GetIconOverride("cooldowns", pin.id) }
-            pinned[pin.id] = true
-        end
-    end
-    if settings.showAll then
-        for _, spell in ipairs(spells) do
-            if not pinned[spell.id] and not visible[spell.id] and (settings.allRanks or not spell.lowerRank) then
-                entries[#entries + 1] = { entry = spell, override = settings.overrides[spell.id] }
-            end
-        end
-    end
-    return entries
 end
 
 local function isMissingBuff(id)
@@ -436,28 +396,28 @@ local function auraEntries(settings, visible)
     local entries = {}
     for _, pin in ipairs(settings.entries) do
         local aura = activeAuras[pin.filter][pin.id]
-        local missing = settings.showMissing and pin.filter == "HELPFUL" and not visible[pin.id] and isMissingBuff(pin.id)
-        if missing or (aura and (pin.filter == "HARMFUL" or not visible[pin.id])) then
+        local override = Addon.GetIconOverride("auras", pin.id, pin.filter)
+        local missingOnly = pin.filter == "HELPFUL" and override and override.visibility == "missing"
+        local missing = missingOnly and isMissingBuff(pin.id)
+        if (pin.filter == "HARMFUL" or not visible[pin.id]) and (missing or (aura and not missingOnly)) then
             entries[#entries + 1] = {
                 entry = Addon.GetEntryDetails("auras", pin.id),
-                override = Addon.GetIconOverride("auras", pin.id, pin.filter), aura = aura, missing = missing,
+                override = override, aura = aura, missing = missing,
             }
         end
     end
     return entries
 end
 
-local function layoutSection(key)
-    local frame = sections[key]
-    local settings = db[key]
-    local anchor = visibleViewer(key)
-    if not anchor then
+local function layoutAuras()
+    local frame = auraSection
+    local settings = db.auras
+    local anchor = _G.BuffIconCooldownViewer
+    if not anchor or not anchor:IsVisible() or anchor:IsEditing() then
         frame:Hide()
         return
     end
-    local isAura = key == "auras"
-    local visible = visibleSpells(key)
-    local entries = isAura and auraEntries(settings, visible) or cooldownEntries(settings, visible)
+    local entries = auraEntries(settings, visibleBuffs(anchor))
     local count = #entries
     local columns = math.max(1, math.min(settings.columns, count))
     local step = settings.size + settings.gap
@@ -473,8 +433,8 @@ local function layoutSection(key)
         if not icon then
             icon = createIcon(frame)
             frame.icons[index] = icon
-            icon.cooldown:SetReverse(isAura)
-            icon.cooldown:SetUseAuraDisplayTime(isAura)
+            icon.cooldown:SetReverse(true)
+            icon.cooldown:SetUseAuraDisplayTime(true)
         end
         local row = math.floor((index - 1) / columns)
         local column = (index - 1) % columns
@@ -489,11 +449,7 @@ local function layoutSection(key)
         icon:SetAlpha(item.missing and 0.5 or 1)
         icon.missing:SetShown(item.missing == true)
         applyTimerStyle(icon.cooldown, settings, item.override)
-        if isAura then
-            updateAuraTimer(icon, settings, item.aura)
-        else
-            updateSpellTimer(icon, settings)
-        end
+        updateAuraTimer(icon, settings, item.aura)
         icon:Show()
     end
     for index = count + 1, #frame.icons do
@@ -505,22 +461,9 @@ end
 
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
-local missingMarkers = setmetatable({}, { __mode = "k" })
 local rankIcons = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
-local function updateMissingMarker(item, viewer, id)
-    local marker = missingMarkers[item]
-    local missing = id and not viewer:IsEditing() and db.auras.showMissing
-        and Addon.FindPin("auras", id, "HELPFUL") and isMissingBuff(id)
-    if missing and not marker then
-        marker = item:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        marker:SetPoint("TOPLEFT", 3, -2)
-        marker:SetText("!")
-        missingMarkers[item] = marker
-    end
-    if marker then marker:SetShown(missing == true) end
-end
 
 local function viewerOverride(item, key, id)
     local settings = db[key]
@@ -589,7 +532,6 @@ local function styleViewerItem(item, viewer, key)
     local settings = db[key]
     local id = number(apiCall(item.GetSpellID, item))
     local editing = viewer.IsEditing and viewer:IsEditing()
-    if key == "auras" then updateMissingMarker(item, viewer, id) end
     if not settings.styleBlizzard or editing or not id then
         local original = savedStyles[cooldown]
         if original then
@@ -681,11 +623,11 @@ local function styleBlizzardViewers()
                     local function refreshViewer(self) styleViewer(self, key) end
                     local layoutPending
                     local function queueLayout()
-                        if layoutPending then return end
+                        if key ~= "auras" or layoutPending then return end
                         layoutPending = true
                         C_Timer.After(0, function()
                             layoutPending = false
-                            layoutSection(key)
+                            layoutAuras()
                         end)
                     end
                     hooksecurefunc(viewer, "RefreshData", function(self)
@@ -708,9 +650,8 @@ local function styleBlizzardViewers()
 end
 
 function Addon.ApplySettings()
-    layoutSection("cooldowns")
-    layoutSection("auras")
     styleBlizzardViewers()
+    layoutAuras()
     if Addon.UpdateOptions then Addon.UpdateOptions() end
 end
 
@@ -724,25 +665,12 @@ local function refresh()
     scheduled = false
     local update = pending
     pending = {}
-    if update.catalog then
-        scanSpellbook()
-        layoutSection("cooldowns")
-    elseif update.cooldowns and sections.cooldowns:IsShown() then
-        for _, icon in ipairs(sections.cooldowns.icons) do
-            if icon.entry then updateSpellTimer(icon, db.cooldowns) end
-        end
-    end
+    if update.catalog then scanSpellbook() end
     if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
     if update.auras then
         scanAuras()
-        layoutSection("auras")
         updateNativeIcons("auras")
-        local viewer = _G.BuffIconCooldownViewer
-        if viewer and viewer:IsVisible() and viewer.itemFramePool then
-            for item in viewer.itemFramePool:EnumerateActive() do
-                updateMissingMarker(item, viewer, number(apiCall(item.GetSpellID, item)))
-            end
-        end
+        layoutAuras()
     end
     if update.blizzard then
         styleBlizzardViewers()
@@ -765,8 +693,17 @@ driver:SetScript("OnEvent", function(_, event, name)
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
         db = BetterForeverCooldownsDB
         fillDefaults(db, defaults)
-        sections.cooldowns = createSection()
-        sections.auras = createSection()
+        db.cooldowns.showAll, db.cooldowns.allRanks = nil, nil
+        db.auras.showMissing = nil
+        if type(db.cooldowns.entries) == "table" then
+            for _, pin in ipairs(db.cooldowns.entries) do
+                if not db.cooldowns.overrides[pin.id] and (pin.numbers ~= nil or pin.swipe ~= nil) then
+                    db.cooldowns.overrides[pin.id] = { numbers = pin.numbers, swipe = pin.swipe }
+                end
+            end
+        end
+        db.cooldowns.entries = nil
+        auraSection = createSection()
         return
     end
     if not db then return end
