@@ -1,413 +1,329 @@
 local _, Addon = ...
-local window, entryButton, syncing
-local section, filter = "cooldowns", "HELPFUL"
-local selected
-local resultPage, pinnedPage = 1, 1
-local pageSize = 7
+local picker
+local attached
+local pageSize = 8
 
-local function label(parent, value, x, y, font)
-    local text = parent:CreateFontString(nil, "OVERLAY", font or "GameFontNormal")
-    text:SetPoint("TOPLEFT", x, y)
-    text:SetText(value)
-    return text
+local function change(section, key, value)
+    Addon.GetSettings(section)[key] = value
+    Addon.ApplySettings()
 end
 
-local function button(parent, value, x, y, width, action)
-    local control = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    control:SetSize(width, 22)
-    control:SetPoint("TOPLEFT", x, y)
-    control:SetText(value)
-    control:SetScript("OnClick", action)
-    return control
-end
-
-local function checkbox(parent, value, x, y, action)
-    local control = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
-    control:SetPoint("TOPLEFT", x, y)
-    control.caption = label(parent, value, x + 27, y - 9, "GameFontHighlightSmall")
-    control:SetScript("OnClick", function(self) action(self:GetChecked()) end)
-    return control
-end
-
-local function settingCheckbox(value, key, x, y)
-    local control = checkbox(window.display, value, x, y, function(checked)
-        Addon.GetSettings(section)[key] = checked
-        Addon.ApplySettings()
+local function addToggle(menu, text, section, key)
+    menu:CreateCheckbox(text, function()
+        return Addon.GetSettings(section)[key]
+    end, function()
+        change(section, key, not Addon.GetSettings(section)[key])
     end)
-    window.checkboxes[key] = control
 end
 
-local function settingSlider(value, key, y, low, high)
-    local control = CreateFrame("Slider", nil, window.display, "UISliderTemplate")
-    control:SetPoint("TOPLEFT", 187, y - 16)
-    control:SetWidth(154)
-    control:SetHeight(12)
-    control:SetMinMaxValues(low, high)
-    control:SetValueStep(1)
-    control:SetObeyStepOnDrag(true)
-    control.caption = label(window.display, value, 185, y, "GameFontHighlightSmall")
-    control.title = value
-    control:SetScript("OnValueChanged", function(_, current)
-        if syncing then return end
-        Addon.GetSettings(section)[key] = math.floor(current + 0.5)
-        Addon.ApplySettings()
-    end)
-    window.sliders[key] = control
-end
-
-local function editbox(parent, x, y, width)
-    local control = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
-    control:SetPoint("TOPLEFT", x, y)
-    control:SetSize(width, 22)
-    control:SetAutoFocus(false)
-    control:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    return control
-end
-
-local function entryText(entry)
-    local parts = { entry.name }
-    if entry.rank and entry.rank ~= "" then parts[#parts + 1] = entry.rank end
-    if entry.level and entry.level > 0 then parts[#parts + 1] = "Lv. " .. entry.level end
-    if entry.filter == "HARMFUL" then parts[#parts + 1] = "Debuff" end
-    return table.concat(parts, "  ·  ")
-end
-
-local function sameEntry(left, right)
-    return right ~= nil and left.id == right.id and left.filter == right.filter
-end
-
-local function updatePinControls()
-    local pinIndex, pin
-    if selected then pinIndex, pin = Addon.FindPin(section, selected.id, selected.filter) end
-    local total = #Addon.GetSettings(section).entries
-    window.remove:SetEnabled(pin ~= nil)
-    window.up:SetEnabled(pinIndex ~= nil and pinIndex > 1)
-    window.down:SetEnabled(pinIndex ~= nil and pinIndex < total)
-    for key, control in pairs(window.overrides) do
-        local state = pin and pin[key]
-        local value = state == true and "On" or state == false and "Off" or "Default"
-        control:SetText(control.title .. ": " .. value)
-        control:SetEnabled(pin ~= nil)
+local function addChoices(menu, title, section, key, choices)
+    local submenu = menu:CreateButton(title)
+    for _, choice in ipairs(choices) do
+        submenu:CreateRadio(choice[1], function()
+            return Addon.GetSettings(section)[key] == choice[2]
+        end, function()
+            change(section, key, choice[2])
+        end)
     end
 end
 
-local function createEntryRow(x, y, isPinned)
-    local row = CreateFrame("Button", nil, window.tracking)
-    row:SetSize(165, 25)
-    row:SetPoint("TOPLEFT", x, y)
-    row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
-    row.selected = row:CreateTexture(nil, "BACKGROUND")
-    row.selected:SetAllPoints()
-    row.selected:SetColorTexture(1, 0.76, 0.2, 0.2)
-    row.icon = row:CreateTexture(nil, "ARTWORK")
-    row.icon:SetPoint("LEFT", 2, 0)
-    row.icon:SetSize(20, 20)
-    row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.label:SetPoint("LEFT", row.icon, "RIGHT", 5, 0)
-    row.label:SetPoint("RIGHT", -3, 0)
-    row.label:SetJustifyH("LEFT")
-    row.label:SetMaxLines(1)
-    row:SetScript("OnClick", function(self)
-        if not self.entry then return end
-        selected = { id = self.entry.id, filter = self.entry.filter }
-        if not isPinned then Addon.Pin(section, selected.id, selected.filter) end
-        Addon.UpdateChoices()
-    end)
-    row:SetScript("OnEnter", function(self)
-        if not self.entry then return end
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetSpellByID(self.entry.id)
-        GameTooltip:AddLine("Spell ID " .. self.entry.id, 0.65, 0.65, 0.65)
-        GameTooltip:Show()
-    end)
-    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    return row
+local function chooseColor(section)
+    if not ColorPickerFrame and C_AddOns then C_AddOns.LoadAddOn("Blizzard_ColorPickerFrame") end
+    if not ColorPickerFrame or not ColorPickerFrame.SetupColorPickerAndShow then return end
+    local color = Addon.GetSettings(section).color
+    local function component(start) return (tonumber(color:sub(start, start + 1), 16) or 255) / 255 end
+    ColorPickerFrame:SetupColorPickerAndShow({
+        r = component(1), g = component(3), b = component(5), hasOpacity = false,
+        swatchFunc = function()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            change(section, "color", ("%02x%02x%02x"):format(r * 255 + 0.5, g * 255 + 0.5, b * 255 + 0.5))
+        end,
+        cancelFunc = function() change(section, "color", color) end,
+    })
 end
 
-local function updateRows(list, entries, page, isPinned)
-    local pages = math.max(1, math.ceil(#entries / pageSize))
-    page = math.min(math.max(1, page), pages)
-    for index, row in ipairs(list.rows) do
-        local entry = entries[(page - 1) * pageSize + index]
+local function displayMenu(menu, section)
+    addToggle(menu, "Style Blizzard icons", section, "styleBlizzard")
+    addToggle(menu, "Countdown numbers", section, "numbers")
+    addToggle(menu, "Radial swipe", section, "swipe")
+    addToggle(menu, section == "auras" and "Show stacks" or "Show charges", section, "stacks")
+    if section == "auras" then
+        addToggle(menu, "Show missing tracked buffs", section, "showMissing")
+    else
+        addToggle(menu, "Ignore global cooldown on added spells", section, "ignoreGCD")
+    end
+    menu:CreateDivider()
+    menu:CreateButton("Countdown color…", function() chooseColor(section) end)
+    addChoices(menu, "Countdown size", section, "fontSize", { {"Small", 12}, {"Medium", 17}, {"Large", 22}, {"Extra large", 28} })
+    addChoices(menu, "Countdown decimals", section, "decimals", { {"Off", 0}, {"Under 3 seconds", 3}, {"Under 5 seconds", 5}, {"Under 10 seconds", 10} })
+    local layout = menu:CreateButton("Added icon layout")
+    addChoices(layout, "Size", section, "size", { {"28", 28}, {"38", 38}, {"48", 48}, {"60", 60} })
+    addChoices(layout, "Spacing", section, "gap", { {"Tight", 2}, {"Normal", 4}, {"Wide", 8} })
+    addChoices(layout, "Icons per row", section, "columns", { {"6", 6}, {"8", 8}, {"12", 12}, {"16", 16} })
+    addChoices(layout, "Alignment", section, "alignment", { {"Left", "LEFT"}, {"Center", "CENTER"}, {"Right", "RIGHT"} })
+end
+
+local function iconMenu(menu, section, id, filter)
+    for _, field in ipairs({ {"Countdown numbers", "numbers"}, {"Radial swipe", "swipe"} }) do
+        local key = field[2]
+        local submenu = menu:CreateButton(field[1])
+        for _, choice in ipairs({ {"Use display setting"}, {"Show", true}, {"Hide", false} }) do
+            local value = choice[2]
+            submenu:CreateRadio(choice[1], function()
+                local override = Addon.GetIconOverride(section, id, filter)
+                if override then return override[key] == value end
+                return value == nil
+            end, function()
+                Addon.SetIconOverride(section, id, filter, key, value)
+            end)
+        end
+    end
+end
+
+local function button(parent, text, width, action)
+    local frame = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    frame:SetSize(width, 22)
+    frame:SetText(text)
+    frame:SetScript("OnClick", action)
+    return frame
+end
+
+function Addon.UpdateChoices()
+    if not picker or not picker:IsVisible() then return end
+    local section, filter = picker.section, picker.filter
+    local settings = Addon.GetSettings(section)
+    local query = picker.search:GetText():lower():match("^%s*(.-)%s*$")
+    local entries = {}
+    if picker.trackedOnly then
+        for _, pin in ipairs(settings.entries) do
+            if pin.filter == filter then entries[#entries + 1] = Addon.GetEntryDetails(section, pin.id) end
+        end
+    else
+        entries = Addon.GetChoices(section, filter, settings.allRanks)
+    end
+    local matches = {}
+    for _, entry in ipairs(entries) do
+        local name = entry.name
+        if entry.rank and entry.rank ~= "" then name = name .. " (" .. entry.rank .. ")" end
+        if entry.level and entry.level > 0 then name = name .. " · Lv. " .. entry.level end
+        if (name .. " " .. entry.id):lower():find(query, 1, true) then
+            matches[#matches + 1] = { id = entry.id, icon = entry.icon, text = name }
+        end
+    end
+    local pages = math.max(1, math.ceil(#matches / pageSize))
+    picker.page = math.min(pages, math.max(1, picker.page))
+    for index, row in ipairs(picker.rows) do
+        local entry = matches[(picker.page - 1) * pageSize + index]
         row.entry = entry
         row:SetShown(entry ~= nil)
         if entry then
             row.icon:SetTexture(entry.icon)
-            local prefix = ""
-            if not isPinned and Addon.FindPin(section, entry.id, entry.filter) then prefix = "+ " end
-            row.label:SetText(prefix .. entryText(entry))
-            row.selected:SetShown(sameEntry(entry, selected))
+            row.label:SetText(entry.text)
+            row.mark:SetText(Addon.FindPin(section, entry.id, filter) and "✓" or "")
         end
     end
-    list.page:SetText(page .. " / " .. pages)
-    list.previous:SetEnabled(page > 1)
-    list.next:SetEnabled(page < pages)
-    return page
+    picker.empty:SetShown(#matches == 0)
+    picker.pageText:SetText(("%d / %d"):format(picker.page, pages))
+    picker.previous:SetEnabled(picker.page > 1)
+    picker.next:SetEnabled(picker.page < pages)
 end
 
-function Addon.UpdateChoices()
-    if not window or not window:IsShown() then return end
-    local settings = Addon.GetSettings(section)
-    local query = window.search:GetText():lower():match("^%s*(.-)%s*$")
-    local choices = {}
-    for _, entry in ipairs(Addon.GetChoices(section, filter, settings.allRanks)) do
-        local text = (entryText(entry) .. " " .. entry.id):lower()
-        if query == "" or text:find(query, 1, true) then choices[#choices + 1] = entry end
-    end
-    resultPage = updateRows(window.results, choices, resultPage, false)
-    local pins = {}
-    for index, entry in ipairs(settings.entries) do
-        local details = Addon.GetEntryDetails(section, entry.id)
-        pins[index] = {
-            id = entry.id, filter = entry.filter, name = details.name,
-            icon = details.icon, rank = details.rank, level = details.level,
-        }
-    end
-    pinnedPage = updateRows(window.pinned, pins, pinnedPage, true)
-    if #choices == 0 then
-        window.empty:SetText(section == "auras" and "No matching active effects" or "No matching abilities")
-    else
-        window.empty:SetText("")
-    end
-    updatePinControls()
-end
+Addon.UpdateOptions = Addon.UpdateChoices
 
-local function addAuraByID()
-    local text = window.auraID:GetText():match("^%s*(%d+)%s*$")
-    local id = text and tonumber(text)
+local function addAuraID()
+    local id = tonumber(picker.search:GetText():match("^%s*(%d+)%s*$"))
     if not id or id < 1 or id > 2147483647 or not C_Spell.GetSpellInfo(id) then
-        window.status:SetText("Enter a valid aura spell ID.")
+        picker.status:SetText("Enter the effect's aura spell ID.")
         return
     end
-    selected = { id = id, filter = filter }
-    Addon.Pin(section, id, filter)
-    window.auraID:SetText("")
-    window.auraID:ClearFocus()
-    window.status:SetText("")
-    Addon.UpdateChoices()
+    Addon.Pin(picker.section, id, picker.filter)
+    picker.search:SetText("")
+    picker.status:SetText("Aura added. View it under Tracked.")
 end
 
-local function switchSection(key)
-    section = key
-    selected = nil
-    pinnedPage, resultPage = 1, 1
-    window.search:SetText("")
-    window.status:SetText("")
-    Addon.UpdateOptions()
-end
-
-local function switchFilter(value)
-    filter = value
-    resultPage = 1
-    window.status:SetText("")
-    Addon.UpdateOptions()
-end
-
-local function makeList(x, isPinned)
-    local list = { rows = {} }
-    for index = 1, pageSize do
-        list.rows[index] = createEntryRow(x, -93 - (index - 1) * 26, isPinned)
-    end
-    list.previous = button(window.tracking, "<", x, -280, 36, function()
-        if isPinned then pinnedPage = pinnedPage - 1 else resultPage = resultPage - 1 end
-        Addon.UpdateChoices()
-    end)
-    list.page = label(window.tracking, "", x + 49, -285, "GameFontHighlightSmall")
-    list.next = button(window.tracking, ">", x + 104, -280, 36, function()
-        if isPinned then pinnedPage = pinnedPage + 1 else resultPage = resultPage + 1 end
-        Addon.UpdateChoices()
-    end)
-    return list
-end
-
-local function changePinPosition(offset)
-    if not selected then return end
+local function movePin(section, id, filter, offset)
+    local index = Addon.FindPin(section, id, filter)
+    if not index then return end
     local entries = Addon.GetSettings(section).entries
-    local index = Addon.FindPin(section, selected.id, selected.filter)
-    if not index or not entries[index + offset] then return end
-    entries[index], entries[index + offset] = entries[index + offset], entries[index]
-    pinnedPage = math.ceil((index + offset) / pageSize)
+    local target = index + offset
+    while entries[target] and entries[target].filter ~= filter do target = target + offset end
+    if not entries[target] then return end
+    entries[index], entries[target] = entries[target], entries[index]
     Addon.ApplySettings()
 end
 
-local function overrideButton(key, title, x)
-    local control = button(window.tracking, title, x, -352, 112, function()
-        if not selected then return end
-        local _, pin = Addon.FindPin(section, selected.id, selected.filter)
-        if not pin then return end
-        if pin[key] == nil then
-            pin[key] = true
-        elseif pin[key] then
-            pin[key] = false
-        else
-            pin[key] = nil
-        end
-        Addon.ApplySettings()
-    end)
-    control.title = title
-    window.overrides[key] = control
-end
+local function makePicker(manager)
+    picker = CreateFrame("Frame", "BetterForeverCooldownsPicker", manager, "BasicFrameTemplateWithInset")
+    picker:SetPoint("CENTER")
+    picker:SetSize(347, 371)
+    picker:SetFrameLevel(manager:GetFrameLevel() + 50)
+    picker:EnableMouse(true)
+    picker:EnableMouseWheel(true)
+    picker:SetScript("OnMouseWheel", function() end)
+    picker:Hide()
+    manager:HookScript("OnHide", function() picker:Hide() end)
+    hooksecurefunc(manager, "SetDisplayMode", function() picker:Hide() end)
+    table.insert(UISpecialFrames, picker:GetName())
 
-local function makeWindow(manager)
-    window = CreateFrame("Frame", "BetterForeverCooldownsOptions", manager)
-    window:SetPoint("TOPLEFT", 12, -66)
-    window:SetPoint("BOTTOMRIGHT", -12, 29)
-    window:SetFrameLevel(manager:GetFrameLevel() + 20)
-    window:EnableMouse(true)
-    window:EnableMouseWheel(true)
-    window:SetScript("OnMouseWheel", function() end)
-    local background = window:CreateTexture(nil, "BACKGROUND")
-    background:SetAllPoints()
-    background:SetColorTexture(0.08, 0.07, 0.06, 1)
-    window.checkboxes, window.sliders, window.overrides = {}, {}, {}
-
-    window.cooldowns = button(window, "Cooldowns", 10, -9, 100, function() switchSection("cooldowns") end)
-    window.auras = button(window, "Self Auras", 113, -9, 100, function() switchSection("auras") end)
-    window.tracking = CreateFrame("Frame", nil, window)
-    window.tracking:SetPoint("TOPLEFT", 0, -36)
-    window.tracking:SetPoint("BOTTOMRIGHT")
-    window.display = CreateFrame("Frame", nil, window)
-    window.display:SetAllPoints(window.tracking)
-    window.display:Hide()
-    window.page = button(window, "Display", 260, -9, 100, function(self)
-        local showDisplay = not window.display:IsShown()
-        window.display:SetShown(showDisplay)
-        window.tracking:SetShown(not showDisplay)
-        self:SetText(showDisplay and "Tracking" or "Display")
-    end)
-
-    local tracking = window.tracking
-    window.resultsTitle = label(tracking, "", 12, -8)
-    window.search = editbox(tracking, 16, -32, 156)
-    window.search:SetScript("OnTextChanged", function()
-        resultPage = 1
+    picker.search = CreateFrame("EditBox", nil, picker, "SearchBoxTemplate")
+    picker.search:SetAutoFocus(false)
+    picker.search:SetSize(215, 25)
+    picker.search:SetPoint("TOPLEFT", 15, -31)
+    picker.search:SetScript("OnTextChanged", function(self)
+        if SearchBoxTemplate_OnTextChanged then SearchBoxTemplate_OnTextChanged(self) end
+        picker.page = 1
+        picker.status:SetText("")
         Addon.UpdateChoices()
     end)
-    window.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-    window.empty = label(tracking, "", 12, -104, "GameFontDisableSmall")
-    label(tracking, "Click an entry to track it", 12, -68, "GameFontDisableSmall")
-    label(tracking, "Tracked icons", 192, -8)
-    label(tracking, "Select an icon to edit it", 192, -68, "GameFontDisableSmall")
-    window.results = makeList(12, false)
-    window.pinned = makeList(192, true)
-    window.helpful = button(tracking, "Buffs", 192, -32, 75, function() switchFilter("HELPFUL") end)
-    window.harmful = button(tracking, "Debuffs", 275, -32, 78, function() switchFilter("HARMFUL") end)
-    window.remove = button(tracking, "Remove", 192, -315, 68, function()
-        if not selected then return end
-        local index = Addon.FindPin(section, selected.id, selected.filter)
-        if not index then return end
-        table.remove(Addon.GetSettings(section).entries, index)
-        selected = nil
-        Addon.ApplySettings()
+    picker.search:SetScript("OnEnterPressed", function(self)
+        if picker.filter then addAuraID() end
+        self:ClearFocus()
     end)
-    window.up = button(tracking, "Up", 264, -315, 40, function() changePinPosition(-1) end)
-    window.down = button(tracking, "Down", 308, -315, 47, function() changePinPosition(1) end)
-    overrideButton("numbers", "Timer", 125)
-    overrideButton("swipe", "Swipe", 243)
-    window.idLabel = label(tracking, "Aura spell ID", 12, -311, "GameFontHighlightSmall")
-    window.auraID = editbox(tracking, 16, -327, 85)
-    window.auraID:SetNumeric(true)
-    window.auraID:SetScript("OnEnterPressed", addAuraByID)
-    window.addID = button(tracking, "Add", 105, -327, 55, addAuraByID)
-    window.status = label(tracking, "", 12, -383, "GameFontHighlightSmall")
-    window.note = label(tracking, "", 12, -409, "GameFontDisableSmall")
-    window.note:SetWidth(343)
-    window.note:SetJustifyH("LEFT")
-
-    local display = window.display
-    label(display, "Icon display", 12, -12)
-    settingCheckbox("Countdown numbers", "numbers", 8, -35)
-    settingCheckbox("Radial swipe", "swipe", 8, -64)
-    settingCheckbox("Stacks on extra icons", "stacks", 8, -93)
-    settingCheckbox("Show missing buffs", "showMissing", 8, -122)
-    settingCheckbox("Ignore global cooldown", "ignoreGCD", 8, -122)
-    settingCheckbox("Show all learned abilities", "showAll", 8, -151)
-    settingCheckbox("Show all learned ranks", "allRanks", 8, -180)
-    settingCheckbox("Style Blizzard icons", "styleBlizzard", 8, -209)
-    settingSlider("Timer size", "fontSize", -35, 8, 32)
-    settingSlider("Decimals below (sec)", "decimals", -75, 0, 10)
-    settingSlider("Extra icon size", "size", -115, 20, 68)
-    settingSlider("Extra icon spacing", "gap", -155, 0, 14)
-    settingSlider("Extra icons per row", "columns", -195, 1, 16)
-    window.alignment = button(display, "", 185, -235, 158, function()
-        local settings = Addon.GetSettings(section)
-        local nextAlignment = { CENTER = "LEFT", LEFT = "RIGHT", RIGHT = "CENTER" }
-        settings.alignment = nextAlignment[settings.alignment] or "CENTER"
-        Addon.ApplySettings()
+    picker.mode = button(picker, "Tracked", 90, function(self)
+        picker.trackedOnly = not picker.trackedOnly
+        picker.page = 1
+        self:SetText(picker.trackedOnly and "Browse" or "Tracked")
+        Addon.UpdateChoices()
     end)
-    label(display, "Timer color (RRGGBB)", 185, -271, "GameFontHighlightSmall")
-    window.color = editbox(display, 189, -290, 78)
-    window.color:SetMaxLetters(6)
-    window.color:SetScript("OnEditFocusLost", function(self)
-        local color = self:GetText():lower()
-        if color:match("^%x%x%x%x%x%x$") and color ~= Addon.GetSettings(section).color then
-            Addon.GetSettings(section).color = color
-            Addon.ApplySettings()
-        else
-            self:SetText(Addon.GetSettings(section).color)
-        end
+    picker.mode:SetPoint("TOPRIGHT", -14, -32)
+    picker.rows = {}
+    for index = 1, pageSize do
+        local row = CreateFrame("Button", nil, picker)
+        row:SetSize(316, 27)
+        row:SetPoint("TOPLEFT", 15, -65 - (index - 1) * 27)
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetSize(22, 22)
+        row.icon:SetPoint("LEFT")
+        row.mark = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        row.mark:SetPoint("RIGHT", -6, 0)
+        row.mark:SetWidth(16)
+        row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.label:SetPoint("LEFT", row.icon, "RIGHT", 7, 0)
+        row.label:SetPoint("RIGHT", row.mark, "LEFT", -6, 0)
+        row.label:SetJustifyH("LEFT")
+        row.label:SetMaxLines(1)
+        row:SetScript("OnClick", function(self, mouseButton)
+            if not self.entry then return end
+            local id = self.entry.id
+            local section, filter = picker.section, picker.filter
+            if mouseButton == "RightButton" then
+                MenuUtil.CreateContextMenu(self, function(_, root)
+                    iconMenu(root, section, id, filter)
+                    if Addon.FindPin(section, id, filter) then
+                        root:CreateDivider()
+                        root:CreateButton("Move earlier", function() movePin(section, id, filter, -1) end)
+                        root:CreateButton("Move later", function() movePin(section, id, filter, 1) end)
+                    end
+                end)
+                return
+            end
+            local pin = Addon.FindPin(section, id, filter)
+            if pin then
+                table.remove(Addon.GetSettings(section).entries, pin)
+                Addon.ApplySettings()
+            else
+                Addon.Pin(section, id, filter)
+            end
+        end)
+        row:SetScript("OnEnter", function(self)
+            if not self.entry then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetSpellByID(self.entry.id)
+            GameTooltip:AddLine("Left-click to track · Right-click for display", 0.8, 0.8, 0.8)
+            GameTooltip:Show()
+        end)
+        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        picker.rows[index] = row
+    end
+    picker.empty = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    picker.empty:SetPoint("TOPLEFT", 17, -77)
+    picker.empty:SetText("No matching entries")
+    picker.previous = button(picker, "<", 32, function()
+        picker.page = picker.page - 1
+        Addon.UpdateChoices()
     end)
-    window.color:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    picker.previous:SetPoint("TOPLEFT", 15, -290)
+    picker.next = button(picker, ">", 32, function()
+        picker.page = picker.page + 1
+        Addon.UpdateChoices()
+    end)
+    picker.next:SetPoint("LEFT", picker.previous, "RIGHT", 67, 0)
+    picker.pageText = picker:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    picker.pageText:SetPoint("LEFT", picker.previous, "RIGHT", 16, 0)
+    picker.addID = button(picker, "Add aura ID", 103, addAuraID)
+    picker.addID:SetPoint("TOPRIGHT", -14, -290)
+    picker.status = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    picker.status:SetPoint("BOTTOMLEFT", 16, 27)
+    local hint = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("BOTTOMLEFT", 16, 12)
+    hint:SetText("Click to toggle tracking. Right-click for display.")
 end
 
-function Addon.UpdateOptions()
-    if not window or not window:IsShown() then return end
-    syncing = true
-    local isAura = section == "auras"
-    local settings = Addon.GetSettings(section)
-    window.cooldowns:SetEnabled(isAura)
-    window.auras:SetEnabled(not isAura)
-    window.helpful:SetEnabled(filter ~= "HELPFUL")
-    window.harmful:SetEnabled(filter ~= "HARMFUL")
-    for _, control in ipairs({ window.helpful, window.harmful, window.idLabel, window.auraID, window.addID }) do
-        control:SetShown(isAura)
-    end
-    window.resultsTitle:SetText(isAura and "Search active effects" or "Search learned abilities")
-    window.note:SetText(isAura
-        and "Dimmed icons mark missing tracked buffs. Debuffs appear while active. Use the effect's aura spell ID when it differs from the cast."
-        or "Extra abilities follow Essential or Utility. Move the Blizzard viewers in Edit Mode.")
-    for key, control in pairs(window.checkboxes) do
-        control:SetChecked(settings[key] == true)
-        local visible = settings[key] ~= nil
-        control:SetShown(visible)
-        control.caption:SetShown(visible)
-    end
-    for key, control in pairs(window.sliders) do
-        control:SetValue(settings[key])
-        control.caption:SetText(control.title .. ": " .. settings[key])
-    end
-    window.alignment:SetText("Alignment: " .. settings.alignment:lower())
-    if not window.color:HasFocus() then window.color:SetText(settings.color) end
-    syncing = false
+local function openPicker(section, filter)
+    if not CooldownViewerSettings:IsVisible() then return end
+    if not picker then makePicker(CooldownViewerSettings) end
+    picker.section, picker.filter = section, filter
+    picker.trackedOnly, picker.page = false, 1
+    picker.mode:SetText("Tracked")
+    picker.TitleText:SetText(filter == "HELPFUL" and "Add self buffs" or filter == "HARMFUL" and "Add self debuffs" or "Add learned abilities")
+    picker.addID:SetShown(filter ~= nil)
+    picker.search:SetText("")
+    picker.status:SetText("")
+    picker:Show()
     Addon.UpdateChoices()
 end
 
-local function showPage(shown)
-    if shown then
-        if not window then makeWindow(CooldownViewerSettings) end
-        window:Show()
-        Addon.UpdateOptions()
-    elseif window then
-        window:Hide()
+local function settingsMenu(_, root)
+    root:CreateDivider()
+    local spells = root:CreateButton("Spells")
+    addToggle(spells, "Show all learned abilities", "cooldowns", "showAll")
+    addToggle(spells, "Show all learned ranks", "cooldowns", "allRanks")
+    spells:CreateButton("Add abilities or ranks…", function() openPicker("cooldowns") end)
+    displayMenu(spells:CreateButton("Cooldown icon display"), "cooldowns")
+    local auras = root:CreateButton("Self auras")
+    auras:CreateButton("Add self buffs…", function() openPicker("auras", "HELPFUL") end)
+    auras:CreateButton("Add self debuffs…", function() openPicker("auras", "HARMFUL") end)
+    displayMenu(auras:CreateButton("Aura icon display"), "auras")
+end
+
+local function itemMenu(owner, root)
+    local category = owner:GetCategory()
+    if issecretvalue and issecretvalue(category) then return end
+    if category == nil then return end
+    local categories = Enum.CooldownViewerCategory
+    local aura = category == categories.TrackedBuff or category == categories.HiddenPassive
+    local spell = category == categories.Essential or category == categories.Utility or category == categories.HiddenActive
+    if not aura and not spell then return end
+    local id = owner:GetBaseSpellID()
+    if (not issecretvalue or not issecretvalue(id)) and id == nil then id = owner:GetSpellID() end
+    if issecretvalue and issecretvalue(id) then return end
+    if type(id) ~= "number" then return end
+    root:CreateDivider()
+    local section, filter = aura and "auras" or "cooldowns", aura and "HELPFUL" or nil
+    iconMenu(root:CreateButton("Icon display"), section, id, filter)
+    if aura then
+        local auraID = owner:GetSpellID()
+        if (not issecretvalue or not issecretvalue(auraID)) and type(auraID) == "number" then
+            root:CreateButton("Track on yourself…", function()
+                openPicker("auras", "HELPFUL")
+                if picker and picker:IsVisible() then picker.search:SetText(tostring(auraID)) end
+            end)
+        end
     end
-    entryButton:SetText(shown and "Blizzard" or "Extras")
 end
 
 function Addon.AttachOptions()
-    local manager = CooldownViewerSettings
-    if entryButton or not manager or not manager.SettingsDropdown then return end
-    entryButton = button(manager, "Extras", 0, 0, 75, function()
-        showPage(not window or not window:IsShown())
-    end)
-    entryButton:ClearAllPoints()
-    entryButton:SetPoint("LEFT", manager.SettingsDropdown, "RIGHT", 8, 0)
-    manager:HookScript("OnHide", function() showPage(false) end)
-    hooksecurefunc(manager, "SetDisplayMode", function() showPage(false) end)
+    if attached or not Menu or not Menu.ModifyMenu then return end
+    attached = true
+    Menu.ModifyMenu("COOLDOWN_VIEWER_SETTINGS_MENU", settingsMenu)
+    Menu.ModifyMenu("MENU_COOLDOWN_SETTINGS_ITEM", itemMenu)
 end
 
 function Addon.ShowOptions()
     Addon.AttachOptions()
-    if not entryButton or InCombatLockdown() then return end
-    if not CooldownViewerSettings:IsVisible() then CooldownViewerSettings:ShowUIPanel() end
-    if CooldownViewerSettings:IsVisible() then showPage(true) end
+    if CooldownViewerSettings and not InCombatLockdown() and not CooldownViewerSettings:IsVisible() then
+        CooldownViewerSettings:ShowUIPanel()
+    end
 end

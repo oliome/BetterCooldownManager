@@ -16,13 +16,13 @@ local defaults = {
         showAll = false, allRanks = false, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
         size = 38, gap = 4, columns = 12, alignment = "CENTER",
-        entries = {},
+        entries = {}, overrides = {},
     },
     auras = {
         numbers = true, swipe = true, stacks = true, showMissing = true, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
         size = 38, gap = 4, columns = 12, alignment = "CENTER",
-        entries = {},
+        entries = {}, overrides = {},
     },
 }
 
@@ -153,6 +153,21 @@ function Addon.Pin(section, id, filter)
         Addon.ApplySettings()
     end
     return true
+end
+
+function Addon.GetIconOverride(section, id, filter)
+    local _, pin = Addon.FindPin(section, id, filter)
+    return db[section].overrides[id] or pin
+end
+
+function Addon.SetIconOverride(section, id, filter, key, value)
+    local overrides = db[section].overrides
+    if not overrides[id] then
+        local previous = Addon.GetIconOverride(section, id, filter)
+        overrides[id] = { numbers = previous and previous.numbers, swipe = previous and previous.swipe }
+    end
+    overrides[id][key] = value
+    Addon.ApplySettings()
 end
 
 local function applyTimerStyle(cooldown, settings, override)
@@ -344,31 +359,37 @@ local function cooldownEntries(settings, visible)
     for _, pin in ipairs(settings.entries) do
         local spell = spellsByID[pin.id]
         if spell and not visible[pin.id] then
-            entries[#entries + 1] = { entry = spell, override = pin }
+            entries[#entries + 1] = { entry = spell, override = Addon.GetIconOverride("cooldowns", pin.id) }
             pinned[pin.id] = true
         end
     end
     if settings.showAll then
         for _, spell in ipairs(spells) do
             if not pinned[spell.id] and not visible[spell.id] and (settings.allRanks or not spell.lowerRank) then
-                entries[#entries + 1] = { entry = spell }
+                entries[#entries + 1] = { entry = spell, override = settings.overrides[spell.id] }
             end
         end
     end
     return entries
 end
 
+local function isMissingBuff(id)
+    if activeAuras.HELPFUL[id] or not auraListComplete.HELPFUL then return false end
+    if C_Secrets and C_Secrets.ShouldSpellAuraBeSecret then
+        return apiCall(C_Secrets.ShouldSpellAuraBeSecret, id) == false
+    end
+    return true
+end
+
 local function auraEntries(settings, visible)
     local entries = {}
     for _, pin in ipairs(settings.entries) do
         local aura = activeAuras[pin.filter][pin.id]
-        local missing = not aura and settings.showMissing and pin.filter == "HELPFUL" and auraListComplete.HELPFUL
-        if missing and C_Secrets and C_Secrets.ShouldSpellAuraBeSecret then
-            missing = apiCall(C_Secrets.ShouldSpellAuraBeSecret, pin.id) == false
-        end
+        local missing = settings.showMissing and pin.filter == "HELPFUL" and not visible[pin.id] and isMissingBuff(pin.id)
         if missing or (aura and (pin.filter == "HARMFUL" or not visible[pin.id])) then
             entries[#entries + 1] = {
-                entry = Addon.GetEntryDetails("auras", pin.id), override = pin, aura = aura, missing = missing,
+                entry = Addon.GetEntryDetails("auras", pin.id),
+                override = Addon.GetIconOverride("auras", pin.id, pin.filter), aura = aura, missing = missing,
             }
         end
     end
@@ -433,15 +454,49 @@ end
 
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
+local missingMarkers = setmetatable({}, { __mode = "k" })
+
+local function updateMissingMarker(item, viewer, id)
+    local marker = missingMarkers[item]
+    local missing = id and not viewer:IsEditing() and db.auras.showMissing
+        and Addon.FindPin("auras", id, "HELPFUL") and isMissingBuff(id)
+    if missing and not marker then
+        marker = item:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        marker:SetPoint("TOPLEFT", 3, -2)
+        marker:SetText("!")
+        missingMarkers[item] = marker
+    end
+    if marker then marker:SetShown(missing == true) end
+end
+
+local function viewerOverride(item, key, id)
+    local settings = db[key]
+    local filter = key == "auras" and "HELPFUL" or nil
+    local baseID = number(apiCall(item.GetBaseSpellID, item))
+    local nativeOverride = settings.overrides[baseID or id]
+    return nativeOverride or Addon.GetIconOverride(key, id, filter)
+end
+
+local function styleStackCount(item, viewer, key)
+    local label
+    if key == "auras" and item.GetApplicationsFontString then
+        label = item:GetApplicationsFontString()
+    elseif key == "cooldowns" and item.GetChargeCountFrame then
+        label = item:GetChargeCountFrame().Current
+    end
+    if label then label:SetShown(viewer:IsEditing() or not db[key].styleBlizzard or db[key].stacks) end
+end
 
 local function styleViewerItem(item, viewer, key)
+    styleStackCount(item, viewer, key)
     if not item.GetCooldownFrame then return end
     local cooldown = item:GetCooldownFrame()
     if not cooldown then return end
     local settings = db[key]
-    local id = apiCall(item.GetSpellID, item)
+    local id = number(apiCall(item.GetSpellID, item))
     local editing = viewer.IsEditing and viewer:IsEditing()
-    if not settings.styleBlizzard or editing or not number(id) then
+    if key == "auras" then updateMissingMarker(item, viewer, id) end
+    if not settings.styleBlizzard or editing or not id then
         local original = savedStyles[cooldown]
         if original then
             cooldown:SetHideCountdownNumbers(not viewer.timerShown)
@@ -471,8 +526,7 @@ local function styleViewerItem(item, viewer, key)
         end
         savedStyles[cooldown] = style
     end
-    local _, override = Addon.FindPin(key, id, key == "auras" and "HELPFUL" or nil)
-    applyTimerStyle(cooldown, settings, override)
+    applyTimerStyle(cooldown, settings, viewerOverride(item, key, id))
 end
 
 local function styleViewer(viewer, key)
@@ -485,12 +539,16 @@ local function styleViewer(viewer, key)
                 if cooldown and db[key].styleBlizzard and not viewer:IsEditing() then
                     local id = number(apiCall(self.GetSpellID, self))
                     if not id then return end
-                    local _, override = Addon.FindPin(key, id, key == "auras" and "HELPFUL" or nil)
+                    local override = viewerOverride(self, key, id)
                     local swipe = db[key].swipe
                     if override and override.swipe ~= nil then swipe = override.swipe end
                     cooldown:SetDrawSwipe(swipe)
                 end
             end)
+            local countMethod = key == "auras" and "RefreshApplications" or "RefreshSpellChargeInfo"
+            if item[countMethod] then
+                hooksecurefunc(item, countMethod, function(self) styleStackCount(self, viewer, key) end)
+            end
             itemHooks[item] = true
         end
         styleViewerItem(item, viewer, key)
@@ -560,6 +618,12 @@ local function refresh()
     if update.auras then
         scanAuras()
         layoutSection("auras")
+        local viewer = _G.BuffIconCooldownViewer
+        if viewer and viewer:IsVisible() and viewer.itemFramePool then
+            for item in viewer.itemFramePool:EnumerateActive() do
+                updateMissingMarker(item, viewer, number(apiCall(item.GetSpellID, item)))
+            end
+        end
     end
     if update.blizzard then
         styleBlizzardViewers()
