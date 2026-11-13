@@ -5,19 +5,23 @@ local activeAuras = { HELPFUL = {}, HARMFUL = {} }
 local auraListComplete = {}
 local sections = {}
 local unknownIcon = 134400
+local viewerNames = {
+    cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
+    auras = { "BuffIconCooldownViewer" },
+}
 
 local defaults = {
     cooldowns = {
         numbers = true, swipe = true, stacks = true, ignoreGCD = true,
         showAll = false, allRanks = false, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
-        size = 38, gap = 4, columns = 12, alignment = "CENTER", x = 0, y = 190,
+        size = 38, gap = 4, columns = 12, alignment = "CENTER",
         entries = {},
     },
     auras = {
-        numbers = true, swipe = true, stacks = true, showMissing = true,
+        numbers = true, swipe = true, stacks = true, showMissing = true, styleBlizzard = true,
         fontSize = 17, color = "ffffff", decimals = 5,
-        size = 38, gap = 4, columns = 12, alignment = "CENTER", x = 0, y = 125,
+        size = 38, gap = 4, columns = 12, alignment = "CENTER",
         entries = {},
     },
 }
@@ -307,52 +311,46 @@ local function createIcon(parent)
     return icon
 end
 
-local function savePosition(frame, settings)
-    frame:StopMovingOrSizing()
-    settings.x = (frame:GetLeft() + frame:GetRight()) / 2 - UIParent:GetWidth() / 2
-    settings.y = frame:GetBottom()
-    frame:ClearAllPoints()
-    frame:SetPoint("BOTTOM", UIParent, "BOTTOM", settings.x, settings.y)
-end
-
-local function createSection(key, label)
+local function createSection()
     local frame = CreateFrame("Frame", nil, UIParent)
-    frame:SetClampedToScreen(true)
-    frame:SetMovable(true)
     frame.icons = {}
-    frame.handle = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.handle:SetSize(158, 22)
-    frame.handle:SetPoint("BOTTOM", frame, "TOP", 0, 3)
-    frame.handle:SetText("Move " .. label)
-    frame.handle:RegisterForDrag("LeftButton")
-    frame.handle:SetScript("OnDragStart", function()
-        frame.moving = true
-        frame:StartMoving()
-    end)
-    local function stopMoving()
-        if not frame.moving then return end
-        frame.moving = nil
-        savePosition(frame, db[key])
-    end
-    frame.handle:SetScript("OnDragStop", stopMoving)
-    frame.handle:SetScript("OnHide", stopMoving)
-    frame.handle:Hide()
     frame:Hide()
     return frame
 end
 
-local function cooldownEntries(settings)
+local function visibleViewer(key)
+    for index = #viewerNames[key], 1, -1 do
+        local viewer = _G[viewerNames[key][index]]
+        if viewer and viewer:IsVisible() and not viewer:IsEditing() then return viewer end
+    end
+end
+
+local function visibleSpells(key)
+    local visible = {}
+    for _, name in ipairs(viewerNames[key]) do
+        local viewer = _G[name]
+        if viewer and viewer:IsVisible() and not viewer:IsEditing() and viewer.itemFramePool then
+            for item in viewer.itemFramePool:EnumerateActive() do
+                local id = item:IsVisible() and number(apiCall(item.GetSpellID, item))
+                if id then visible[id] = true end
+            end
+        end
+    end
+    return visible
+end
+
+local function cooldownEntries(settings, visible)
     local entries, pinned = {}, {}
     for _, pin in ipairs(settings.entries) do
         local spell = spellsByID[pin.id]
-        if spell then
+        if spell and not visible[pin.id] then
             entries[#entries + 1] = { entry = spell, override = pin }
             pinned[pin.id] = true
         end
     end
     if settings.showAll then
         for _, spell in ipairs(spells) do
-            if not pinned[spell.id] and (settings.allRanks or not spell.lowerRank) then
+            if not pinned[spell.id] and not visible[spell.id] and (settings.allRanks or not spell.lowerRank) then
                 entries[#entries + 1] = { entry = spell }
             end
         end
@@ -360,7 +358,7 @@ local function cooldownEntries(settings)
     return entries
 end
 
-local function auraEntries(settings)
+local function auraEntries(settings, visible)
     local entries = {}
     for _, pin in ipairs(settings.entries) do
         local aura = activeAuras[pin.filter][pin.id]
@@ -368,7 +366,7 @@ local function auraEntries(settings)
         if missing and C_Secrets and C_Secrets.ShouldSpellAuraBeSecret then
             missing = apiCall(C_Secrets.ShouldSpellAuraBeSecret, pin.id) == false
         end
-        if aura or missing then
+        if missing or (aura and (pin.filter == "HARMFUL" or not visible[pin.id])) then
             entries[#entries + 1] = {
                 entry = Addon.GetEntryDetails("auras", pin.id), override = pin, aura = aura, missing = missing,
             }
@@ -380,18 +378,23 @@ end
 local function layoutSection(key)
     local frame = sections[key]
     local settings = db[key]
+    local anchor = visibleViewer(key)
+    if not anchor then
+        frame:Hide()
+        return
+    end
     local isAura = key == "auras"
-    local entries = isAura and auraEntries(settings) or cooldownEntries(settings)
+    local visible = visibleSpells(key)
+    local entries = isAura and auraEntries(settings, visible) or cooldownEntries(settings, visible)
     local count = #entries
     local columns = math.max(1, math.min(settings.columns, count))
     local step = settings.size + settings.gap
     local width = columns * step - settings.gap
     local height = math.max(1, math.ceil(count / columns)) * step - settings.gap
     frame:SetSize(width, height)
-    if not frame.moving then
-        frame:ClearAllPoints()
-        frame:SetPoint("BOTTOM", UIParent, "BOTTOM", settings.x, settings.y)
-    end
+    frame:ClearAllPoints()
+    frame:SetPoint("TOP", anchor, "BOTTOM", 0, -settings.gap)
+    frame:SetFrameStrata(anchor:GetFrameStrata())
 
     for index, item in ipairs(entries) do
         local icon = frame.icons[index]
@@ -425,17 +428,17 @@ local function layoutSection(key)
         frame.icons[index].entry = nil
         frame.icons[index]:Hide()
     end
-    frame:SetShown(count > 0 or frame.handle:IsShown())
+    frame:SetShown(count > 0)
 end
 
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
 
-local function styleViewerItem(item, viewer)
+local function styleViewerItem(item, viewer, key)
     if not item.GetCooldownFrame then return end
     local cooldown = item:GetCooldownFrame()
     if not cooldown then return end
-    local settings = db.cooldowns
+    local settings = db[key]
     local id = apiCall(item.GetSpellID, item)
     local editing = viewer.IsEditing and viewer:IsEditing()
     if not settings.styleBlizzard or editing or not number(id) then
@@ -443,6 +446,7 @@ local function styleViewerItem(item, viewer)
         if original then
             cooldown:SetHideCountdownNumbers(not viewer.timerShown)
             local swipe = item.cooldownShowSwipe
+            if key == "auras" then swipe = original.swipe end
             if readable(swipe) and type(swipe) == "boolean" then cooldown:SetDrawSwipe(swipe) end
             cooldown:SetCountdownMillisecondsThreshold(original.decimals)
             local label = cooldown:GetCountdownFontString()
@@ -456,7 +460,10 @@ local function styleViewerItem(item, viewer)
     end
 
     if not savedStyles[cooldown] then
-        local style = { decimals = cooldown:GetCountdownMillisecondsThreshold() }
+        local style = {
+            decimals = cooldown:GetCountdownMillisecondsThreshold(),
+            swipe = apiCall(cooldown.GetDrawSwipe, cooldown),
+        }
         local label = cooldown:GetCountdownFontString()
         if label then
             style.font, style.size, style.flags = label:GetFont()
@@ -464,41 +471,63 @@ local function styleViewerItem(item, viewer)
         end
         savedStyles[cooldown] = style
     end
-    local _, override = Addon.FindPin("cooldowns", id)
+    local _, override = Addon.FindPin(key, id, key == "auras" and "HELPFUL" or nil)
     applyTimerStyle(cooldown, settings, override)
 end
 
-local function styleViewer(viewer)
+local function styleViewer(viewer, key)
     if not viewer.itemFramePool then return end
     for item in viewer.itemFramePool:EnumerateActive() do
-        if not itemHooks[item] and item.RefreshSpellCooldownInfo then
-            hooksecurefunc(item, "RefreshSpellCooldownInfo", function(self)
+        local method = key == "auras" and "RefreshCooldownInfo" or "RefreshSpellCooldownInfo"
+        if not itemHooks[item] and item[method] then
+            hooksecurefunc(item, method, function(self)
                 local cooldown = self:GetCooldownFrame()
-                if cooldown and db.cooldowns.styleBlizzard and not viewer:IsEditing() then
+                if cooldown and db[key].styleBlizzard and not viewer:IsEditing() then
                     local id = number(apiCall(self.GetSpellID, self))
                     if not id then return end
-                    local _, override = Addon.FindPin("cooldowns", id)
-                    local swipe = db.cooldowns.swipe
+                    local _, override = Addon.FindPin(key, id, key == "auras" and "HELPFUL" or nil)
+                    local swipe = db[key].swipe
                     if override and override.swipe ~= nil then swipe = override.swipe end
                     cooldown:SetDrawSwipe(swipe)
                 end
             end)
             itemHooks[item] = true
         end
-        styleViewerItem(item, viewer)
+        styleViewerItem(item, viewer, key)
     end
 end
 
 local function styleBlizzardViewers()
-    for _, name in ipairs({ "EssentialCooldownViewer", "UtilityCooldownViewer" }) do
-        local viewer = _G[name]
-        if viewer and viewer.itemFramePool then
-            if not viewerHooks[viewer] then
-                hooksecurefunc(viewer, "RefreshData", styleViewer)
-                hooksecurefunc(viewer, "SetTimerShown", styleViewer)
-                viewerHooks[viewer] = true
+    for key, names in pairs(viewerNames) do
+        for _, name in ipairs(names) do
+            local viewer = _G[name]
+            if viewer and viewer.itemFramePool then
+                if not viewerHooks[viewer] then
+                    local function refreshViewer(self) styleViewer(self, key) end
+                    local layoutPending
+                    local function queueLayout()
+                        if layoutPending then return end
+                        layoutPending = true
+                        C_Timer.After(0, function()
+                            layoutPending = false
+                            layoutSection(key)
+                        end)
+                    end
+                    hooksecurefunc(viewer, "RefreshData", function(self)
+                        refreshViewer(self)
+                        queueLayout()
+                    end)
+                    hooksecurefunc(viewer, "SetTimerShown", refreshViewer)
+                    hooksecurefunc(viewer, "SetIsEditing", function(self)
+                        refreshViewer(self)
+                        queueLayout()
+                    end)
+                    viewer:HookScript("OnShow", queueLayout)
+                    viewer:HookScript("OnHide", queueLayout)
+                    viewerHooks[viewer] = true
+                end
+                styleViewer(viewer, key)
             end
-            styleViewer(viewer)
         end
     end
 end
@@ -508,13 +537,6 @@ function Addon.ApplySettings()
     layoutSection("auras")
     styleBlizzardViewers()
     if Addon.UpdateOptions then Addon.UpdateOptions() end
-end
-
-function Addon.SetMoving(moving)
-    for key, section in pairs(sections) do
-        section.handle:SetShown(moving)
-        layoutSection(key)
-    end
 end
 
 local catalogEvents = {
@@ -530,7 +552,7 @@ local function refresh()
     if update.catalog then
         scanSpellbook()
         layoutSection("cooldowns")
-    elseif update.cooldowns then
+    elseif update.cooldowns and sections.cooldowns:IsShown() then
         for _, icon in ipairs(sections.cooldowns.icons) do
             if icon.entry then updateSpellTimer(icon, db.cooldowns) end
         end
@@ -539,7 +561,10 @@ local function refresh()
         scanAuras()
         layoutSection("auras")
     end
-    if update.blizzard then styleBlizzardViewers() end
+    if update.blizzard then
+        styleBlizzardViewers()
+        Addon.AttachOptions()
+    end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
 end
 
@@ -557,8 +582,8 @@ driver:SetScript("OnEvent", function(_, event, name)
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
         db = BetterForeverCooldownsDB
         fillDefaults(db, defaults)
-        sections.cooldowns = createSection("cooldowns", "Cooldowns")
-        sections.auras = createSection("auras", "Self Auras")
+        sections.cooldowns = createSection()
+        sections.auras = createSection()
         return
     end
     if not db then return end

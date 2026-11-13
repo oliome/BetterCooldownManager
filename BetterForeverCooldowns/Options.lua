@@ -1,5 +1,5 @@
 local _, Addon = ...
-local window, moveDone, syncing
+local window, entryButton, syncing
 local section, filter = "cooldowns", "HELPFUL"
 local selected
 local resultPage, pinnedPage = 1, 1
@@ -30,7 +30,7 @@ local function checkbox(parent, value, x, y, action)
 end
 
 local function settingCheckbox(value, key, x, y)
-    local control = checkbox(window, value, x, y, function(checked)
+    local control = checkbox(window.display, value, x, y, function(checked)
         Addon.GetSettings(section)[key] = checked
         Addon.ApplySettings()
     end)
@@ -38,14 +38,14 @@ local function settingCheckbox(value, key, x, y)
 end
 
 local function settingSlider(value, key, y, low, high)
-    local control = CreateFrame("Slider", nil, window, "UISliderTemplate")
-    control:SetPoint("TOPLEFT", 540, y - 15)
-    control:SetWidth(212)
+    local control = CreateFrame("Slider", nil, window.display, "UISliderTemplate")
+    control:SetPoint("TOPLEFT", 187, y - 16)
+    control:SetWidth(154)
     control:SetHeight(12)
     control:SetMinMaxValues(low, high)
     control:SetValueStep(1)
     control:SetObeyStepOnDrag(true)
-    control.caption = label(window, value, 538, y)
+    control.caption = label(window.display, value, 185, y, "GameFontHighlightSmall")
     control.title = value
     control:SetScript("OnValueChanged", function(_, current)
         if syncing then return end
@@ -92,8 +92,8 @@ local function updatePinControls()
 end
 
 local function createEntryRow(x, y, isPinned)
-    local row = CreateFrame("Button", nil, window)
-    row:SetSize(240, 25)
+    local row = CreateFrame("Button", nil, window.tracking)
+    row:SetSize(165, 25)
     row:SetPoint("TOPLEFT", x, y)
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
     row.selected = row:CreateTexture(nil, "BACKGROUND")
@@ -206,14 +206,14 @@ end
 local function makeList(x, isPinned)
     local list = { rows = {} }
     for index = 1, pageSize do
-        list.rows[index] = createEntryRow(x, -143 - (index - 1) * 26, isPinned)
+        list.rows[index] = createEntryRow(x, -93 - (index - 1) * 26, isPinned)
     end
-    list.previous = button(window, "<", x, -330, 36, function()
+    list.previous = button(window.tracking, "<", x, -280, 36, function()
         if isPinned then pinnedPage = pinnedPage - 1 else resultPage = resultPage - 1 end
         Addon.UpdateChoices()
     end)
-    list.page = label(window, "", x + 49, -335, "GameFontHighlightSmall")
-    list.next = button(window, ">", x + 104, -330, 36, function()
+    list.page = label(window.tracking, "", x + 49, -285, "GameFontHighlightSmall")
+    list.next = button(window.tracking, ">", x + 104, -280, 36, function()
         if isPinned then pinnedPage = pinnedPage + 1 else resultPage = resultPage + 1 end
         Addon.UpdateChoices()
     end)
@@ -231,7 +231,7 @@ local function changePinPosition(offset)
 end
 
 local function overrideButton(key, title, x)
-    local control = button(window, title, x, -394, 120, function()
+    local control = button(window.tracking, title, x, -352, 112, function()
         if not selected then return end
         local _, pin = Addon.FindPin(section, selected.id, selected.filter)
         if not pin then return end
@@ -248,54 +248,51 @@ local function overrideButton(key, title, x)
     window.overrides[key] = control
 end
 
-local function beginMoving()
-    window:Hide()
-    moveDone:Show()
-    Addon.SetMoving(true)
-end
-
-local function makeWindow()
-    window = CreateFrame("Frame", "BetterForeverCooldownsOptions", UIParent, "BasicFrameTemplateWithInset")
-    window:SetSize(778, 522)
-    window:SetPoint("CENTER")
-    window:SetFrameStrata("DIALOG")
-    window:SetClampedToScreen(true)
-    window:SetMovable(true)
+local function makeWindow(manager)
+    window = CreateFrame("Frame", "BetterForeverCooldownsOptions", manager)
+    window:SetPoint("TOPLEFT", 12, -66)
+    window:SetPoint("BOTTOMRIGHT", -12, 29)
+    window:SetFrameLevel(manager:GetFrameLevel() + 20)
     window:EnableMouse(true)
-    window:RegisterForDrag("LeftButton")
-    window:SetScript("OnDragStart", window.StartMoving)
-    window:SetScript("OnDragStop", window.StopMovingOrSizing)
-    window.TitleText:SetText("Better Forever Cooldowns")
-    table.insert(UISpecialFrames, window:GetName())
+    window:EnableMouseWheel(true)
+    window:SetScript("OnMouseWheel", function() end)
+    local background = window:CreateTexture(nil, "BACKGROUND")
+    background:SetAllPoints()
+    background:SetColorTexture(0.08, 0.07, 0.06, 1)
     window.checkboxes, window.sliders, window.overrides = {}, {}, {}
 
-    window.cooldowns = button(window, "Cooldowns", 18, -34, 112, function() switchSection("cooldowns") end)
-    window.auras = button(window, "Self Auras", 136, -34, 112, function() switchSection("auras") end)
-    button(window, "Move icon sections", 603, -34, 149, beginMoving)
-    moveDone = CreateFrame("Button", nil, UIParent, "UIPanelButtonTemplate")
-    moveDone:SetSize(200, 26)
-    moveDone:SetPoint("TOP", UIParent, "TOP", 0, -100)
-    moveDone:SetFrameStrata("DIALOG")
-    moveDone:SetText("Done moving icon sections")
-    moveDone:SetScript("OnClick", Addon.ShowOptions)
-    moveDone:Hide()
+    window.cooldowns = button(window, "Cooldowns", 10, -9, 100, function() switchSection("cooldowns") end)
+    window.auras = button(window, "Self Auras", 113, -9, 100, function() switchSection("auras") end)
+    window.tracking = CreateFrame("Frame", nil, window)
+    window.tracking:SetPoint("TOPLEFT", 0, -36)
+    window.tracking:SetPoint("BOTTOMRIGHT")
+    window.display = CreateFrame("Frame", nil, window)
+    window.display:SetAllPoints(window.tracking)
+    window.display:Hide()
+    window.page = button(window, "Display", 260, -9, 100, function(self)
+        local showDisplay = not window.display:IsShown()
+        window.display:SetShown(showDisplay)
+        window.tracking:SetShown(not showDisplay)
+        self:SetText(showDisplay and "Tracking" or "Display")
+    end)
 
-    window.resultsTitle = label(window, "", 18, -76)
-    window.search = editbox(window, 22, -100, 230)
+    local tracking = window.tracking
+    window.resultsTitle = label(tracking, "", 12, -8)
+    window.search = editbox(tracking, 16, -32, 156)
     window.search:SetScript("OnTextChanged", function()
         resultPage = 1
         Addon.UpdateChoices()
     end)
     window.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-    window.empty = label(window, "", 22, -153, "GameFontDisableSmall")
-    label(window, "Click an entry to track it", 18, -124, "GameFontDisableSmall")
-    label(window, "Tracked icons", 274, -76)
-    label(window, "Select an icon to reorder or style it", 274, -124, "GameFontDisableSmall")
-    window.results = makeList(18, false)
-    window.pinned = makeList(274, true)
-    window.helpful = button(window, "Buffs", 274, -98, 84, function() switchFilter("HELPFUL") end)
-    window.harmful = button(window, "Debuffs", 362, -98, 84, function() switchFilter("HARMFUL") end)
-    window.remove = button(window, "Remove", 274, -363, 90, function()
+    window.empty = label(tracking, "", 12, -104, "GameFontDisableSmall")
+    label(tracking, "Click an entry to track it", 12, -68, "GameFontDisableSmall")
+    label(tracking, "Tracked icons", 192, -8)
+    label(tracking, "Select an icon to edit it", 192, -68, "GameFontDisableSmall")
+    window.results = makeList(12, false)
+    window.pinned = makeList(192, true)
+    window.helpful = button(tracking, "Buffs", 192, -32, 75, function() switchFilter("HELPFUL") end)
+    window.harmful = button(tracking, "Debuffs", 275, -32, 78, function() switchFilter("HARMFUL") end)
+    window.remove = button(tracking, "Remove", 192, -315, 68, function()
         if not selected then return end
         local index = Addon.FindPin(section, selected.id, selected.filter)
         if not index then return end
@@ -303,42 +300,43 @@ local function makeWindow()
         selected = nil
         Addon.ApplySettings()
     end)
-    window.up = button(window, "Up", 372, -363, 56, function() changePinPosition(-1) end)
-    window.down = button(window, "Down", 434, -363, 64, function() changePinPosition(1) end)
-    overrideButton("numbers", "Timer", 274)
-    overrideButton("swipe", "Swipe", 396)
-    window.idLabel = label(window, "Aura spell ID", 18, -367, "GameFontHighlightSmall")
-    window.auraID = editbox(window, 22, -390, 115)
+    window.up = button(tracking, "Up", 264, -315, 40, function() changePinPosition(-1) end)
+    window.down = button(tracking, "Down", 308, -315, 47, function() changePinPosition(1) end)
+    overrideButton("numbers", "Timer", 125)
+    overrideButton("swipe", "Swipe", 243)
+    window.idLabel = label(tracking, "Aura spell ID", 12, -311, "GameFontHighlightSmall")
+    window.auraID = editbox(tracking, 16, -327, 85)
     window.auraID:SetNumeric(true)
     window.auraID:SetScript("OnEnterPressed", addAuraByID)
-    window.addID = button(window, "Add", 146, -390, 72, addAuraByID)
-    window.status = label(window, "", 18, -422, "GameFontHighlightSmall")
-    window.note = label(window, "", 18, -464, "GameFontDisableSmall")
-    window.note:SetWidth(494)
+    window.addID = button(tracking, "Add", 105, -327, 55, addAuraByID)
+    window.status = label(tracking, "", 12, -383, "GameFontHighlightSmall")
+    window.note = label(tracking, "", 12, -409, "GameFontDisableSmall")
+    window.note:SetWidth(343)
     window.note:SetJustifyH("LEFT")
 
-    label(window, "Icon display", 538, -76)
-    settingCheckbox("Countdown numbers", "numbers", 534, -92)
-    settingCheckbox("Radial swipe", "swipe", 534, -117)
-    settingCheckbox("Stacks or charges", "stacks", 534, -142)
-    settingCheckbox("Show missing buffs", "showMissing", 534, -167)
-    settingCheckbox("Ignore global cooldown", "ignoreGCD", 534, -167)
-    settingCheckbox("Show all learned abilities", "showAll", 534, -192)
-    settingCheckbox("Show all learned ranks", "allRanks", 534, -217)
-    settingCheckbox("Style Blizzard cooldown icons", "styleBlizzard", 534, -242)
-    settingSlider("Timer size", "fontSize", -278, 8, 32)
-    settingSlider("Decimals below (seconds)", "decimals", -311, 0, 10)
-    settingSlider("Icon size", "size", -344, 20, 68)
-    settingSlider("Icon spacing", "gap", -377, 0, 14)
-    settingSlider("Icons per row", "columns", -410, 1, 16)
-    window.alignment = button(window, "", 538, -452, 212, function()
+    local display = window.display
+    label(display, "Icon display", 12, -12)
+    settingCheckbox("Countdown numbers", "numbers", 8, -35)
+    settingCheckbox("Radial swipe", "swipe", 8, -64)
+    settingCheckbox("Stacks on extra icons", "stacks", 8, -93)
+    settingCheckbox("Show missing buffs", "showMissing", 8, -122)
+    settingCheckbox("Ignore global cooldown", "ignoreGCD", 8, -122)
+    settingCheckbox("Show all learned abilities", "showAll", 8, -151)
+    settingCheckbox("Show all learned ranks", "allRanks", 8, -180)
+    settingCheckbox("Style Blizzard icons", "styleBlizzard", 8, -209)
+    settingSlider("Timer size", "fontSize", -35, 8, 32)
+    settingSlider("Decimals below (sec)", "decimals", -75, 0, 10)
+    settingSlider("Extra icon size", "size", -115, 20, 68)
+    settingSlider("Extra icon spacing", "gap", -155, 0, 14)
+    settingSlider("Extra icons per row", "columns", -195, 1, 16)
+    window.alignment = button(display, "", 185, -235, 158, function()
         local settings = Addon.GetSettings(section)
         local nextAlignment = { CENTER = "LEFT", LEFT = "RIGHT", RIGHT = "CENTER" }
         settings.alignment = nextAlignment[settings.alignment] or "CENTER"
         Addon.ApplySettings()
     end)
-    label(window, "Timer color (RRGGBB)", 538, -487, "GameFontHighlightSmall")
-    window.color = editbox(window, 671, -482, 78)
+    label(display, "Timer color (RRGGBB)", 185, -271, "GameFontHighlightSmall")
+    window.color = editbox(display, 189, -290, 78)
     window.color:SetMaxLetters(6)
     window.color:SetScript("OnEditFocusLost", function(self)
         local color = self:GetText():lower()
@@ -364,10 +362,10 @@ function Addon.UpdateOptions()
     for _, control in ipairs({ window.helpful, window.harmful, window.idLabel, window.auraID, window.addID }) do
         control:SetShown(isAura)
     end
-    window.resultsTitle:SetText(isAura and "Search active effects on you" or "Search learned abilities")
+    window.resultsTitle:SetText(isAura and "Search active effects" or "Search learned abilities")
     window.note:SetText(isAura
         and "Dimmed icons mark missing tracked buffs. Debuffs appear while active. Use the effect's aura spell ID when it differs from the cast."
-        or "Pin a specific rank to keep it after learning a higher one. Blizzard's Edit Mode controls the placement of Essential and Utility icons.")
+        or "Extra abilities follow Essential or Utility. Move the Blizzard viewers in Edit Mode.")
     for key, control in pairs(window.checkboxes) do
         control:SetChecked(settings[key] == true)
         local visible = settings[key] ~= nil
@@ -384,12 +382,32 @@ function Addon.UpdateOptions()
     Addon.UpdateChoices()
 end
 
-function Addon.ShowOptions()
-    if not window then makeWindow() end
-    if moveDone:IsShown() then
-        moveDone:Hide()
-        Addon.SetMoving(false)
+local function showPage(shown)
+    if shown then
+        if not window then makeWindow(CooldownViewerSettings) end
+        window:Show()
+        Addon.UpdateOptions()
+    elseif window then
+        window:Hide()
     end
-    window:Show()
-    Addon.UpdateOptions()
+    entryButton:SetText(shown and "Blizzard" or "Extras")
+end
+
+function Addon.AttachOptions()
+    local manager = CooldownViewerSettings
+    if entryButton or not manager or not manager.SettingsDropdown then return end
+    entryButton = button(manager, "Extras", 0, 0, 75, function()
+        showPage(not window or not window:IsShown())
+    end)
+    entryButton:ClearAllPoints()
+    entryButton:SetPoint("LEFT", manager.SettingsDropdown, "RIGHT", 8, 0)
+    manager:HookScript("OnHide", function() showPage(false) end)
+    hooksecurefunc(manager, "SetDisplayMode", function() showPage(false) end)
+end
+
+function Addon.ShowOptions()
+    Addon.AttachOptions()
+    if not entryButton or InCombatLockdown() then return end
+    if not CooldownViewerSettings:IsVisible() then CooldownViewerSettings:ShowUIPanel() end
+    if CooldownViewerSettings:IsVisible() then showPage(true) end
 end
