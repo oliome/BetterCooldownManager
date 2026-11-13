@@ -359,7 +359,7 @@ local function updateAuraTimer(icon, settings, aura)
     end
 end
 
-local function createIcon(parent, onCooldownDone)
+local function createIcon(parent)
     local icon = CreateFrame("Frame", nil, parent)
     local border = icon:CreateTexture(nil, "BACKGROUND")
     border:SetAllPoints()
@@ -374,7 +374,6 @@ local function createIcon(parent, onCooldownDone)
     icon.cooldown:SetDrawEdge(false)
     icon.cooldown:SetMinimumCountdownDuration(0)
     icon.cooldown:SetCountdownAbbrevThreshold(600)
-    if onCooldownDone then icon.cooldown:SetScript("OnCooldownDone", onCooldownDone) end
     local overlay = CreateFrame("Frame", nil, icon)
     overlay:SetAllPoints()
     overlay:SetFrameLevel(icon.cooldown:GetFrameLevel() + 1)
@@ -581,7 +580,7 @@ end
 
 local viewerHooks, itemHooks = {}, {}
 local savedStyles = setmetatable({}, { __mode = "k" })
-local rankIcons = setmetatable({}, { __mode = "k" })
+local rankTimers = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
 local function updateRange(icon)
@@ -706,22 +705,49 @@ local function updateNativeIcon(item, viewer, key)
     local id = number(apiCall(item.GetSpellID, item)) or number(apiCall(item.GetBaseSpellID, item))
     local override = id and not viewer:IsEditing() and viewerOverride(item, key, id)
     local rank = override and spellsByID[override.rankID]
-    local icon = rankIcons[item]
-    if rank then
-        if not icon then
-            icon = createIcon(item, function() updateNativeIcon(item, viewer, key) end)
-            icon:SetAllPoints(item)
-            icon:SetFrameLevel(item:GetFrameLevel() + 8)
-            rankIcons[item] = icon
+    local timer = rankTimers[item]
+    local nativeCooldown = rank and item:GetCooldownFrame()
+    if nativeCooldown then
+        if not timer then
+            local frame = CreateFrame("Frame", nil, item)
+            frame:SetAllPoints(item)
+            frame:SetFrameLevel(item:GetFrameLevel() + 4)
+            local cooldown = CreateFrame("Cooldown", nil, frame)
+            cooldown:SetAllPoints(nativeCooldown)
+            cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
+            cooldown:SetDrawBling(false)
+            cooldown:SetDrawEdge(false)
+            cooldown:SetCountdownFont(item.cooldownFont or "GameFontHighlightOutline")
+            cooldown:SetScript("OnCooldownDone", function() updateNativeIcon(item, viewer, key) end)
+            local countFrame = CreateFrame("Frame", nil, frame)
+            countFrame:SetAllPoints(item)
+            countFrame:SetFrameLevel(cooldown:GetFrameLevel() + 1)
+            local font = viewer == _G.EssentialCooldownViewer and "NumberFontNormal" or "NumberFontNormalSmall"
+            local count = countFrame:CreateFontString(nil, "OVERLAY", font)
+            count:SetPoint("BOTTOMRIGHT", -2, 2)
+            timer = { frame = frame, cooldown = cooldown, count = count }
+            rankTimers[item] = timer
         end
-        icon.entry = rank
-        icon.texture:SetTexture(rank.icon)
-        icon.missing:Hide()
-        applyTimerStyle(icon.cooldown, db[key], override)
-        updateSpellTimer(icon, db[key])
-        icon:Show()
-    elseif icon then
-        icon:Hide()
+        if not timer.nativeCooldown then
+            timer.nativeCooldown = nativeCooldown
+            timer.cooldownAlpha = nativeCooldown:GetAlpha()
+            nativeCooldown:SetAlpha(0)
+            local chargeFrame = item:GetChargeCountFrame()
+            if chargeFrame then
+                timer.chargeFrame = chargeFrame
+                timer.chargeAlpha = chargeFrame:GetAlpha()
+                chargeFrame:SetAlpha(0)
+            end
+        end
+        timer.entry = rank
+        applyTimerStyle(timer.cooldown, db[key], override)
+        updateSpellTimer(timer, db[key])
+        timer.frame:Show()
+    elseif timer and timer.nativeCooldown then
+        timer.frame:Hide()
+        timer.nativeCooldown:SetAlpha(timer.cooldownAlpha)
+        if timer.chargeFrame then timer.chargeFrame:SetAlpha(timer.chargeAlpha) end
+        timer.nativeCooldown, timer.chargeFrame = nil, nil
     end
 
     local mode = override and override.visibility
@@ -735,7 +761,7 @@ local function updateNativeIcon(item, viewer, key)
             if activeID and activeAuras.HELPFUL[activeID] then show = false end
         end
         local unknown = show == nil and InCombatLockdown()
-        showUnknown(item, rank and icon or item, unknown)
+        showUnknown(item, nativeCooldown and timer.frame or item, unknown)
         filteredItems[item] = true
         item:SetShown(show == true or unknown == true)
     else
