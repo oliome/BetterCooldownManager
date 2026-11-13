@@ -510,16 +510,32 @@ local function isAuraMissing(id)
             end
         end
     end
+    if buffListComplete then return true end
     if C_Secrets and C_Secrets.ShouldSpellAuraBeSecret then
         local restricted = apiCall(C_Secrets.ShouldSpellAuraBeSecret, spellID)
         if not readable(restricted) or restricted ~= false then return nil end
         if lookupAbsent then return true end
     end
-    if buffListComplete then return true end
 end
 
-local function missingForOverride(id, override)
+local function nativeBuffMissing(item)
+    if not item.GetAuraDataUnit or not item.GetAuraSpellInstanceID then return nil end
+    local ok, unit = pcall(item.GetAuraDataUnit, item)
+    local instanceOK, instance = pcall(item.GetAuraSpellInstanceID, item)
+    if not ok or not instanceOK or not readable(unit) or not readable(instance) then return nil end
+    if unit == "player" then
+        local expired = apiCall(item.IsExpired, item)
+        if readable(expired) and type(expired) == "boolean" then return expired end
+        return nil
+    end
+    if unit == nil and instance == nil then return true end
+end
+
+local function missingForOverride(item, id, override)
     local missing = isAuraMissing(id)
+    local nativeMissing = nativeBuffMissing(item)
+    if nativeMissing == false then return false end
+    if missing == nil then missing = nativeMissing end
     if missing == false then return false end
     for alternative in pairs(override.alternatives or {}) do
         local absent = isAuraMissing(alternative)
@@ -687,15 +703,7 @@ local function updateNativeIcon(item, viewer, key)
         if mode == "ready" then
             show = isSpellReady(rank and rank.id or baseID or id)
         else
-            show = missingForOverride(override.auraID or id, override)
-            local unit = apiCall(item.GetAuraDataUnit, item)
-            if readable(unit) and unit == "player" then
-                local activeID = number(apiCall(item.GetAuraSpellID, item))
-                local expired = apiCall(item.IsExpired, item)
-                if (activeID and activeBuffs[activeID]) or (readable(expired) and expired == false) then
-                    show = false
-                end
-            end
+            show = missingForOverride(item, override.auraID or id, override)
         end
         item:SetShown(show == true)
         filteredItems[item] = true
@@ -787,6 +795,11 @@ local function styleViewer(viewer, key)
         if not itemHooks[item] then
             if item.UpdateShownState then
                 hooksecurefunc(item, "UpdateShownState", function(self)
+                    updateNativeIcon(self, viewer, key)
+                end)
+            end
+            if key == "auras" and item.RefreshData then
+                hooksecurefunc(item, "RefreshData", function(self)
                     updateNativeIcon(self, viewer, key)
                 end)
             end
