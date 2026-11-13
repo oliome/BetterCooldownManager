@@ -359,8 +359,8 @@ local function updateAuraTimer(icon, settings, aura)
     end
 end
 
-local function createIcon(parent)
-    local icon = CreateFrame("Frame", nil, parent)
+local function createIcon(parent, auraIcon)
+    local icon = CreateFrame(auraIcon and "Button" or "Frame", nil, parent)
     local border = icon:CreateTexture(nil, "BACKGROUND")
     border:SetAllPoints()
     border:SetColorTexture(0.08, 0.08, 0.08, 1)
@@ -382,8 +382,17 @@ local function createIcon(parent)
     icon.missing = overlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     icon.missing:SetPoint("CENTER")
     icon.missing:SetText("!")
-    icon:SetMouseClickEnabled(false)
+    icon:SetMouseClickEnabled(auraIcon == true)
     icon:SetMouseMotionEnabled(true)
+    if auraIcon then
+        icon:SetPassThroughButtons("LeftButton", "MiddleButton", "Button4", "Button5")
+        icon:RegisterForClicks("RightButtonUp")
+        icon:SetScript("OnClick", function(self)
+            if self.auraFilter == "HARMFUL" and self.entry then
+                Addon.ShowDebuffIconMenu(self, self.entry.id)
+            end
+        end)
+    end
     icon:SetScript("OnEnter", function(self)
         if not self.entry then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -396,6 +405,9 @@ local function createIcon(parent)
             GameTooltip:AddLine("Status unavailable", 0.8, 0.8, 0.8)
         elseif self.missing:IsShown() then
             GameTooltip:AddLine("Missing buff", 1, 0.55, 0.3)
+        end
+        if self.auraFilter == "HARMFUL" then
+            GameTooltip:AddLine("Right-click to change duration display", 0.8, 0.8, 0.8)
         end
         GameTooltip:Show()
     end)
@@ -519,7 +531,7 @@ local function auraEntries(settings, visible)
         if (pin.filter == "HARMFUL" or not visible[pin.id]) and (missing or unknown or (aura and not missingOnly)) then
             entries[#entries + 1] = {
                 entry = Addon.GetEntryDetails("auras", pin.id),
-                override = override, aura = aura, missing = missing, unknown = unknown,
+                override = override, aura = aura, missing = missing, unknown = unknown, filter = pin.filter,
             }
         end
     end
@@ -548,7 +560,7 @@ local function layoutAuras()
     for index, item in ipairs(entries) do
         local icon = frame.icons[index]
         if not icon then
-            icon = createIcon(frame)
+            icon = createIcon(frame, true)
             frame.icons[index] = icon
             icon.cooldown:SetReverse(true)
             icon.cooldown:SetUseAuraDisplayTime(true)
@@ -561,6 +573,8 @@ local function layoutAuras()
         icon:SetPoint("TOPLEFT", frame, "TOPLEFT", (column + offset) * step, -row * step)
         icon:SetSize(settings.size, settings.size)
         icon.entry = item.entry
+        icon.auraFilter = item.filter
+        icon:SetMouseClickEnabled(item.filter == "HARMFUL")
         icon.texture:SetTexture(item.entry.icon)
         icon.unknown = item.unknown
         icon.texture:SetDesaturated(item.missing == true or item.unknown == true)

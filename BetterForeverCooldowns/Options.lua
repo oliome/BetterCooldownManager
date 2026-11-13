@@ -94,6 +94,20 @@ local function iconMenu(menu, section, id, filter)
     end
 end
 
+function Addon.ShowDebuffIconMenu(owner, id)
+    local function durationShown()
+        local override = Addon.GetIconOverride("auras", id, "HARMFUL")
+        if override and override.numbers ~= nil then return override.numbers end
+        return Addon.GetSettings("auras").numbers
+    end
+    MenuUtil.CreateContextMenu(owner, function(_, root)
+        root:CreateTitle("Better CDM")
+        root:CreateCheckbox("Show duration", durationShown, function()
+            Addon.SetIconOverride("auras", id, "HARMFUL", "numbers", not durationShown())
+        end)
+    end)
+end
+
 local function button(parent, text, width, action)
     local frame = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
     frame:SetSize(width, 22)
