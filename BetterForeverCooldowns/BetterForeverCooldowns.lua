@@ -243,7 +243,8 @@ function Addon.MoveCustomCooldown(key, section, anchor, before, neighbor)
         return id < 0 and db.customCooldowns.items[-id] or db.customCooldowns.spells[id]
     end
     local saved = entry(key)
-    if not saved or saved.section ~= section or key == neighbor then return end
+    if not saved or key == neighbor then return end
+    saved.section = section
     local _, order = Addon.GetCustomCooldowns(section)
     tDeleteItem(order, key)
     local target = neighbor and entry(neighbor)
@@ -999,10 +1000,10 @@ local function refreshDividers(viewer)
                 frame:Hide()
                 local shadow = frame:CreateTexture(nil, "ARTWORK")
                 shadow:SetPoint("CENTER")
-                shadow:SetColorTexture(0, 0, 0, 1)
+                shadow:SetColorTexture(0, 0, 0, 0.45)
                 local line = frame:CreateTexture(nil, "OVERLAY")
                 line:SetPoint("CENTER")
-                line:SetColorTexture(1, 1, 1, 1)
+                line:SetColorTexture(1, 1, 1, 0.25)
                 frame.shadow, frame.line = shadow, line
                 frames[used] = frame
             end
@@ -1014,9 +1015,9 @@ local function refreshDividers(viewer)
             frame:SetSize(1, 1)
             frame:ClearAllPoints()
             frame:SetPoint("CENTER", item, side, horizontal and offset or 0, horizontal and 0 or offset)
-            local lineWidth, lineHeight = horizontal and 3 or width * 0.8, horizontal and height * 0.8 or 3
+            local lineWidth, lineHeight = horizontal and 2 or width * 0.65, horizontal and height * 0.65 or 2
             frame.line:SetSize(lineWidth, lineHeight)
-            frame.shadow:SetSize(lineWidth + 3, lineHeight + 3)
+            frame.shadow:SetSize(lineWidth + 2, lineHeight + 2)
 
             frame:Show()
         end

@@ -159,6 +159,61 @@ end
 local trackedDisplays = {}
 local customRows = {}
 local refreshTrackedEntries
+local cooldownSections = { { "Essential", "essential" }, { "Utility", "utility" }, { "Items", "items" } }
+local dragPreview
+
+local function positionDragPreview(frame)
+    local x, y = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    frame:ClearAllPoints()
+    frame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", x / scale, y / scale)
+end
+
+local function stopDragPreview(row)
+    if not dragPreview or dragPreview.source ~= row then return end
+    dragPreview.source = nil
+    dragPreview:SetScript("OnUpdate", nil)
+    dragPreview:Hide()
+    row:SetAlpha(1)
+    row.dragging = nil
+end
+
+local function showDragPreview(row)
+    if not dragPreview then
+        dragPreview = CreateFrame("Frame", nil, UIParent)
+        dragPreview:SetFrameStrata("TOOLTIP")
+        dragPreview:EnableMouse(false)
+        dragPreview.icon = dragPreview:CreateTexture(nil, "ARTWORK")
+        dragPreview.icon:SetAllPoints()
+        local border = dragPreview:CreateTexture(nil, "OVERLAY")
+        border:SetAtlas("UI-HUD-CoolDownManager-IconOverlay")
+        border:SetPoint("TOPLEFT", -6, 5)
+        border:SetPoint("BOTTOMRIGHT", 6, -5)
+    end
+    if dragPreview.source then stopDragPreview(dragPreview.source) end
+    local width, height = row:GetSize()
+    local scale = row:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    dragPreview:SetSize(width * scale, height * scale)
+    dragPreview.icon:SetTexture(row.icon:GetTexture())
+    dragPreview.source = row
+    row.dragging = true
+    row:SetAlpha(0.45)
+    positionDragPreview(dragPreview)
+    dragPreview:SetScript("OnUpdate", function(self)
+        if InCombatLockdown() then
+            stopDragPreview(self.source)
+        else
+            positionDragPreview(self)
+        end
+    end)
+    dragPreview:Show()
+end
+
+local function canDropEntry(source, destination, isItem)
+    if source == destination then return true end
+    return source ~= "auras" and (destination == "essential" or destination == "utility"
+        or (destination == "items" and isItem))
+end
 
 local function clearTrackedEntries()
     for display in pairs(trackedDisplays) do display.Container.betterCDMOrder = nil end
@@ -227,10 +282,9 @@ local function createTrackedRow(container)
         else
             GameTooltip:SetSpellByID(self.entryID)
         end
-        GameTooltip:AddLine("Drag to reorder. Right-click to remove.", 0.8, 0.8, 0.8)
-        if self.section == "items" then
-            GameTooltip:AddLine("Right-click to move to a cooldown bar.", 0.8, 0.8, 0.8)
-        end
+        local tip = self.section == "auras" and "Drag to reorder. Right-click for options."
+            or "Drag to reorder or move to another section. Right-click for options."
+        GameTooltip:AddLine(tip, 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -239,9 +293,9 @@ local function createTrackedRow(container)
         MenuUtil.CreateContextMenu(self, function(_, root)
             root:CreateTitle("Better CDM")
             if section ~= "auras" then
-                for _, destination in ipairs({ { "Essential", "essential" }, { "Utility", "utility" }, { "Items", "items" } }) do
+                for _, destination in ipairs(cooldownSections) do
                     local label, target = destination[1], destination[2]
-                    if target ~= section and (isItem or target ~= "items") then
+                    if target ~= section and canDropEntry(section, target, isItem) then
                         root:CreateButton("Move to " .. label, function()
                             Addon.SetCustomCooldown(id, isItem, target)
                             refreshTrackedEntries()
@@ -262,41 +316,53 @@ local function createTrackedRow(container)
     row:SetScript("OnDragStart", function(self)
         if InCombatLockdown() or CooldownViewerSettings:GetReorderSourceItem() then return end
         GameTooltip:Hide()
-        self:SetAlpha(0.45)
-        self.dragging = true
+        showDragPreview(self)
     end)
-    row:SetScript("OnHide", function(self)
-        if self.dragging then self:SetAlpha(1) end
-        self.dragging = nil
-    end)
+    row:SetScript("OnHide", stopDragPreview)
     row:SetScript("OnDragStop", function(self)
         if not self.dragging then return end
-        self.dragging = nil
-        self:SetAlpha(1)
-        local container = self:GetParent()
-        if InCombatLockdown() or not container:IsMouseOver() then return end
+        stopDragPreview(self)
+        if InCombatLockdown() then return end
+        local container, destination
+        for display, section in pairs(trackedDisplays) do
+            if display:IsVisible() and canDropEntry(self.section, section, self.isItem) then
+                if display.Container:IsVisible() and display.Container:IsMouseOver() then
+                    container, destination = display.Container, section
+                    break
+                elseif display.Header:IsMouseOver() then
+                    destination = section
+                    break
+                end
+            end
+        end
+        if not destination then return end
         local x, y = GetCursorPosition()
-        local scale = container:GetEffectiveScale()
-        x, y = x / scale, y / scale
-        local nearest, distance
-        for _, item in ipairs(container.betterCDMOrder or {}) do
-            local cx, cy = item:GetCenter()
-            if cx then
-                local delta = (cx - x)^2 + (cy - y)^2
-                if not distance or delta < distance then nearest, distance = item, delta end
+        local anchor, before, neighbor
+        if container then
+            local scale = container:GetEffectiveScale()
+            x, y = x / scale, y / scale
+            local nearest, distance
+            for _, item in ipairs(container.betterCDMOrder or {}) do
+                local cx, cy = item:GetCenter()
+                if cx and cy then
+                    local delta = (cx - x)^2 + (cy - y)^2
+                    if not distance or delta < distance then nearest, distance = item, delta end
+                end
+            end
+            if nearest == self then return end
+            if nearest then
+                neighbor = nearest.betterCDMEntryKey
+                anchor = not neighbor and nearest:GetCooldownID() or nil
+                before = x < nearest:GetCenter()
             end
         end
-        if nearest and nearest ~= self then
-            local cx = nearest:GetCenter()
-            local neighbor = nearest.betterCDMEntryKey
-            local anchor = not neighbor and nearest:GetCooldownID() or nil
-            if self.section == "auras" then
-                Addon.MoveSelfAura(self.entryID, anchor, x < cx, neighbor)
-            else
-                Addon.MoveCustomCooldown(self.betterCDMEntryKey, self.section, anchor, x < cx, neighbor)
-            end
-            refreshTrackedEntries()
+        if not container and destination == self.section then return end
+        if destination == "auras" then
+            Addon.MoveSelfAura(self.entryID, anchor, before, neighbor)
+        else
+            Addon.MoveCustomCooldown(self.betterCDMEntryKey, destination, anchor, before, neighbor)
         end
+        refreshTrackedEntries()
     end)
     return row
 end
@@ -361,15 +427,15 @@ local function attachTrackedControls(manager)
             trackedDisplays[display] = section
             if not controls then
                 controls = CreateFrame("Frame", nil, display.Header)
-                controls:SetSize(215, 22)
-                controls:SetPoint("RIGHT", -32, 0)
+                controls:SetHeight(22)
+                controls:SetPoint("RIGHT", -24, 0)
                 controls.ignoreInLayout = true
                 display.betterCDMTrackedControls = controls
                 local input = CreateFrame("EditBox", nil, controls, "InputBoxTemplate")
                 input:SetAutoFocus(false)
                 input:SetMaxLetters(120)
-                input:SetSize(113, 22)
-                input:SetPoint("LEFT", 5, 0)
+                input:SetSize(108, 22)
+                input:SetPoint("LEFT", 3, 0)
                 local hint = input:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
                 hint:SetPoint("LEFT", 5, 0)
                 controls.hint = hint
@@ -394,9 +460,9 @@ local function attachTrackedControls(manager)
                     refreshTrackedEntries()
                 end
                 input:SetScript("OnEnterPressed", add)
-                local addButton = button(controls, "Add", 59, add)
-                addButton:SetPoint("LEFT", input, "RIGHT", 7, 0)
-                controls.presets = button(controls, "+", 29, function(owner)
+                local addButton = button(controls, "Add", 43, add)
+                addButton:SetPoint("LEFT", input, "RIGHT", 5, 0)
+                controls.presets = button(controls, "+", 22, function(owner)
                     MenuUtil.CreateContextMenu(owner, function(_, root)
                         root:CreateTitle("Class debuffs")
                         local entries, selected = Addon.GetSelfAuraChoices(false)
@@ -421,6 +487,7 @@ local function attachTrackedControls(manager)
                     if current and not collapsed then refreshTrackedDisplay(self, current) end
                 end)
             end
+            controls:SetWidth(section == "auras" and 184 or 159)
             controls.hint:SetText(section == "items" and "Item name or ID" or "Spell name or ID")
             controls.presets:SetShown(section == "auras")
             refreshTrackedDisplay(display, section)
