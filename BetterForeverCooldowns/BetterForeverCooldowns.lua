@@ -926,6 +926,7 @@ local function refresh()
     if update.catalog then scanSpellbook() end
     if update.catalog or update.cooldowns then updateNativeIcons("cooldowns") end
     if update.catalog or update.cooldowns or update.items then updateExtras() end
+    if update.bags and Addon.RefreshCategoryButtons then Addon.RefreshCategoryButtons() end
     if update.auras then
         scanAuras()
         updateNativeIcons("auras")
@@ -993,6 +994,7 @@ driver:SetScript("OnEvent", function(_, event, name)
         pending.auras = true
     elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_TARGET_CHANGED" then
         pending.items = true
+        if event == "BAG_UPDATE_DELAYED" then pending.bags = true end
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         pending.cooldowns, pending.auras = true, true
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_CHARGES" then
