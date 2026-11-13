@@ -221,6 +221,7 @@ local function clearTrackedEntries()
 end
 
 local function addTrackedEntry(id, section, target)
+    if section == "auras" and type(id) == "string" then return Addon.SetSelfAura(id, true) end
     if not id or id < 1 or id > 2147483647 or id % 1 ~= 0 then return false end
     local manager = CooldownViewerSettings
     local categories = Enum.CooldownViewerCategory
@@ -273,8 +274,10 @@ local function createTrackedRow(container)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         if self.isItem then
             GameTooltip:SetItemByID(self.entryID)
-        else
+        elseif type(self.entryID) == "number" then
             GameTooltip:SetSpellByID(self.entryID)
+        else
+            GameTooltip:SetText(self.entryID)
         end
         local tip = self.section == "auras" and "Drag to reorder. Right-click for options."
             or "Drag to reorder or move to another section. Right-click for options."
@@ -372,7 +375,7 @@ local function refreshTrackedDisplay(display, section)
     end
     local entries, order, positions
     if section == "auras" then
-        entries = Addon.GetSelfAuraChoices(true)
+        entries = Addon.GetSelfAuraChoices()
     else
         entries, order, positions = Addon.GetCustomCooldowns(section)
     end
@@ -455,22 +458,6 @@ local function attachTrackedControls(manager)
                 input:SetScript("OnEnterPressed", add)
                 local addButton = button(controls, "Add", 43, add)
                 addButton:SetPoint("LEFT", input, "RIGHT", 5, 0)
-                controls.presets = button(controls, "+", 22, function(owner)
-                    MenuUtil.CreateContextMenu(owner, function(_, root)
-                        root:CreateTitle("Class debuffs")
-                        local entries, selected = Addon.GetSelfAuraChoices(false)
-                        for _, entry in ipairs(entries) do
-                            if not selected[entry.id] then
-                                local id = entry.id
-                                root:CreateButton(entry.name, function()
-                                    addTrackedEntry(id, "auras", categories.TrackedBuff)
-                                    refreshTrackedEntries()
-                                end)
-                            end
-                        end
-                    end)
-                end)
-                controls.presets:SetPoint("LEFT", addButton, "RIGHT", 3, 0)
                 hooksecurefunc(display, "RefreshLayout", function(self)
                     local current = trackedDisplays[self]
                     if current then refreshTrackedDisplay(self, current) end
@@ -480,9 +467,8 @@ local function attachTrackedControls(manager)
                     if current and not collapsed then refreshTrackedDisplay(self, current) end
                 end)
             end
-            controls:SetWidth(section == "auras" and 184 or 159)
+            controls:SetWidth(159)
             controls.hint:SetText(section == "items" and "Item name or ID" or "Spell name or ID")
-            controls.presets:SetShown(section == "auras")
             refreshTrackedDisplay(display, section)
         end
         if controls then controls:SetShown(section ~= nil) end
