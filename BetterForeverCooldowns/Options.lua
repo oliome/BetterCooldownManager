@@ -199,13 +199,7 @@ local function showDragPreview(row)
     row.dragging = true
     row:SetAlpha(0.45)
     positionDragPreview(dragPreview)
-    dragPreview:SetScript("OnUpdate", function(self)
-        if InCombatLockdown() then
-            stopDragPreview(self.source)
-        else
-            positionDragPreview(self)
-        end
-    end)
+    dragPreview:SetScript("OnUpdate", positionDragPreview)
     dragPreview:Show()
 end
 
@@ -227,7 +221,7 @@ local function clearTrackedEntries()
 end
 
 local function addTrackedEntry(id, section, target)
-    if InCombatLockdown() or not id or id < 1 or id > 2147483647 or id % 1 ~= 0 then return false end
+    if not id or id < 1 or id > 2147483647 or id % 1 ~= 0 then return false end
     local manager = CooldownViewerSettings
     local categories = Enum.CooldownViewerCategory
     local provider = manager:GetDataProvider()
@@ -314,7 +308,7 @@ local function createTrackedRow(container)
         end)
     end)
     row:SetScript("OnDragStart", function(self)
-        if InCombatLockdown() or CooldownViewerSettings:GetReorderSourceItem() then return end
+        if CooldownViewerSettings:GetReorderSourceItem() then return end
         GameTooltip:Hide()
         showDragPreview(self)
     end)
@@ -322,7 +316,6 @@ local function createTrackedRow(container)
     row:SetScript("OnDragStop", function(self)
         if not self.dragging then return end
         stopDragPreview(self)
-        if InCombatLockdown() then return end
         local container, destination
         for display, section in pairs(trackedDisplays) do
             if display:IsVisible() and canDropEntry(self.section, section, self.isItem) then
@@ -574,7 +567,7 @@ end
 
 function Addon.ShowOptions()
     Addon.AttachOptions()
-    if CooldownViewerSettings and not InCombatLockdown() and not CooldownViewerSettings:IsVisible() then
+    if CooldownViewerSettings and not CooldownViewerSettings:IsVisible() then
         CooldownViewerSettings:ShowUIPanel()
     end
 end
