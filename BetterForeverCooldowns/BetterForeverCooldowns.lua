@@ -48,32 +48,42 @@ local function isManaGems(item)
         or number(apiCall(item.GetSpellID, item)) == manaGemsSpellID
 end
 
-local function updateItemCount(frame, icon, count)
-    if not icon then return end
-    if count == 0 then icon:SetDesaturated(true) end
+local function getItemCount(id)
+    return number(apiCall(C_Item.GetItemCount, id, false))
+end
+
+local function visibleItemCount(count, id, slot)
+    if count == nil or slot == 13 or slot == 14 then return end
+    local trinketType = Enum.InventoryType and Enum.InventoryType.IndexTrinketType
+    if id and trinketType and number(apiCall(C_Item.GetItemInventoryTypeByID, id)) == trinketType then
+        return
+    end
+    return count
+end
+
+local function updateItemCountLabel(frame, count)
     local label = frame.betterCDMItemCount
     if not label and count ~= nil then
         local overlay = CreateFrame("Frame", nil, frame)
         overlay:SetAllPoints()
         overlay:SetFrameLevel(frame:GetFrameLevel() + 8)
-        label = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+        label = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         label:SetPoint("BOTTOMRIGHT", -3, 3)
         frame.betterCDMItemCount = label
     end
     if label then label:SetText(count or "") end
 end
 
-local function getItemCount(id)
-    return number(apiCall(C_Item.GetItemCount, id, false))
-end
-
 local function getNativeItemCount(item)
     if isManaGems(item) then return manaGemCount end
     local slot = number(apiCall(item.GetEquipSlot, item))
-    local id = slot and number(apiCall(GetInventoryItemID, "player", slot))
-        or number(apiCall(item.GetSpellCategoryTooltipItemID, item))
-    if id then return getItemCount(id) end
-    if slot then return 0 end
+    if slot then
+        local id = number(apiCall(GetInventoryItemID, "player", slot))
+        if id then return getItemCount(id), id, slot end
+        return 0, nil, slot
+    end
+    local id = number(apiCall(item.GetSpellCategoryTooltipItemID, item))
+    if id then return getItemCount(id), id end
 end
 
 local function refreshNativeItemCount(item, method)
@@ -82,7 +92,9 @@ local function refreshNativeItemCount(item, method)
     if not itemCountHooks[item] then
         hooksecurefunc(item, method, function(self)
             local icon = method == "RefreshIconState" and self.Icon or self:GetIconTexture()
-            updateItemCount(self, icon, getNativeItemCount(self))
+            local count, id, slot = getNativeItemCount(self)
+            if icon and count == 0 then icon:SetDesaturated(true) end
+            updateItemCountLabel(self, visibleItemCount(count, id, slot))
         end)
         itemCountHooks[item] = true
     end
@@ -204,7 +216,7 @@ function Addon.GetUsableBagItems()
                 local spell = apiCall(C_Item.GetItemSpell, id)
                 if readable(spell) and spell and not db.customCooldowns.items[id] then
                     local name = apiCall(C_Item.GetItemNameByID, id) or ("Item " .. id)
-                    entries[#entries + 1] = { id = id, name = name, count = getItemCount(id) }
+                    entries[#entries + 1] = { id = id, name = name, count = visibleItemCount(getItemCount(id), id) }
                 end
             end
         end
@@ -239,9 +251,10 @@ function Addon.GetCustomCooldowns(section)
                     name, icon = spellMetadata(id)
                 end
                 local key = isItem and -id or id
+                local count = isItem and getItemCount(id) or nil
                 entries[#entries + 1] = {
                     id = id, key = key, isItem = isItem, name = name, icon = icon, order = entry.order or id,
-                    count = isItem and getItemCount(id) or nil,
+                    count = count, displayCount = visibleItemCount(count, id),
                 }
                 positions[key] = entry.position
             end
@@ -519,9 +532,10 @@ local function refreshCustomCooldowns(viewer)
                 frame.cooldown:SetDrawBling(false)
                 frame.cooldown:SetDrawSwipe(true)
                 frame.cooldown:SetCountdownFont(section == "essential" and "GameFontHighlightHugeOutline" or "GameFontHighlightOutline")
-                local overlay = CreateFrame("Frame", nil, frame.cooldown)
+                local overlay = CreateFrame("Frame", nil, frame)
                 overlay:SetAllPoints()
-                frame.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+                overlay:SetFrameLevel(frame:GetFrameLevel() + 8)
+                frame.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
                 frame.count:SetPoint("BOTTOMRIGHT", -2, 2)
                 frames[used] = frame
             end
@@ -541,7 +555,7 @@ local function refreshCustomCooldowns(viewer)
                     and start and duration and start > 0 and duration > 0 and start + duration > GetTime()
                 if applied then frame.cooldown:SetCooldown(start, duration) end
                 grey = count == 0 or not not applied
-                frame.count:SetText(count or "")
+                frame.count:SetText(entry.displayCount or "")
             else
                 local spell = spellsByID[entry.id]
                 applied, grey = updateSpellTimer(frame, entry.id, spell and spell.slot, spell and spell.lowerRank)

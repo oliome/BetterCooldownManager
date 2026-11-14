@@ -377,7 +377,7 @@ local function refreshTrackedDisplay(display, section)
         row.betterCDMEntryKey = entry.key
         row.icon:SetTexture(entry.icon)
         row.icon:SetDesaturated(entry.count == 0)
-        row.count:SetText(entry.count or "")
+        row.count:SetText(entry.displayCount or "")
         local matches = (entry.name .. " " .. entry.id):lower():find(query, 1, true)
         row.icon:SetAlpha(matches and 1 or 0.3)
     end
