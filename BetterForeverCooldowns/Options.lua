@@ -4,6 +4,12 @@ local openPicker
 local attached
 local pageSize = 8
 
+local function addShortCooldownOption(menu)
+    menu:CreateCheckbox("Show decimals below 3 seconds", Addon.GetShortCooldownDecimals, function()
+        Addon.SetShortCooldownDecimals(not Addon.GetShortCooldownDecimals())
+    end)
+end
+
 local function missingToggle(menu, id, auraID)
     local function checked()
         local override = Addon.GetIconOverride("auras", id)
@@ -278,6 +284,7 @@ local function createTrackedRow(container)
         local id, section, isItem = self.entryID, self.section, self.isItem
         MenuUtil.CreateContextMenu(self, function(_, root)
             root:CreateTitle("Better CDM")
+            addShortCooldownOption(root)
             if isItem then
                 local appearance = root:CreateButton("Icon")
                 for _, choice in ipairs({ { "Item artwork" }, { "Engineering", "engineering" }, { "Potion", "potion" } }) do
@@ -480,8 +487,9 @@ local function itemMenu(owner, root)
     local categories = Enum.CooldownViewerCategory
     local aura = category == categories.TrackedBuff
     local displayed = category == categories.Essential or category == categories.Utility
+    local equipment = category == categories.EquipSlotEssential
     local spell = displayed or category == categories.HiddenActive
-    if not aura and not spell then return end
+    if not aura and not spell and not equipment then return end
     local cooldownID = spell and owner:GetCooldownID()
     local dividerEnabled = (not issecretvalue or not issecretvalue(cooldownID)) and type(cooldownID) == "number"
     local hasDivider = dividerEnabled and Addon.HasDivider(cooldownID)
@@ -489,13 +497,15 @@ local function itemMenu(owner, root)
     local id = owner:GetBaseSpellID()
     if (not issecretvalue or not issecretvalue(id)) and id == nil then id = owner:GetSpellID() end
     local hasSpellID = (not issecretvalue or not issecretvalue(id)) and type(id) == "number"
-    if not hasSpellID and not canSetDivider then return end
+    if not hasSpellID and not canSetDivider and not displayed and not equipment then return end
     local section = aura and "auras" or "cooldowns"
     local displayID = owner:GetSpellID()
     if issecretvalue and issecretvalue(displayID) then displayID = nil end
     if aura and type(displayID) ~= "number" then return end
     root:CreateDivider()
     root:CreateTitle("Better CDM")
+    if displayed or equipment then addShortCooldownOption(root) end
+    if equipment then return end
     if canSetDivider then
         local label = hasDivider and "Remove divider after this ability" or "Add divider after this ability"
         root:CreateButton(label, function() Addon.SetDivider(cooldownID, not hasDivider) end)

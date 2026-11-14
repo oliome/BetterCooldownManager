@@ -8,12 +8,14 @@ local manaGemItemIDs = { 5514, 5513, 8007, 8008 }
 local manaGemCount
 local itemCountHooks = setmetatable({}, { __mode = "k" })
 local itemCountSettingsAttached
+local countdownThresholds = setmetatable({}, { __mode = "k" })
 local viewerNames = {
     cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
     auras = { "BuffIconCooldownViewer" },
 }
 
 local defaults = {
+    shortCooldownDecimals = true,
     cooldowns = { overrides = {}, dividers = {} },
     auras = { overrides = {} },
     customCooldowns = { spells = {}, items = {} },
@@ -53,12 +55,37 @@ local function getItemCount(id)
 end
 
 local function visibleItemCount(count, id, slot)
-    if count == nil or slot == 13 or slot == 14 then return end
+    if not count or count == 0 or slot == 13 or slot == 14 then return end
     local trinketType = Enum.InventoryType and Enum.InventoryType.IndexTrinketType
     if id and trinketType and number(apiCall(C_Item.GetItemInventoryTypeByID, id)) == trinketType then
         return
     end
     return count
+end
+
+function Addon.GetShortCooldownDecimals()
+    return db.shortCooldownDecimals
+end
+
+function Addon.SetShortCooldownDecimals(enabled)
+    db.shortCooldownDecimals = enabled
+    Addon.ApplySettings()
+end
+
+local function updateCountdownThreshold(cooldown)
+    local original = countdownThresholds[cooldown]
+    if db.shortCooldownDecimals then
+        local current = cooldown:GetCountdownMillisecondsThreshold()
+        if original == nil then
+            countdownThresholds[cooldown] = current
+        end
+        if current ~= 3 then
+            cooldown:SetCountdownMillisecondsThreshold(3)
+        end
+    elseif original ~= nil then
+        cooldown:SetCountdownMillisecondsThreshold(original)
+        countdownThresholds[cooldown] = nil
+    end
 end
 
 local function updateItemCountLabel(frame, count)
@@ -546,6 +573,7 @@ local function refreshCustomCooldowns(viewer)
             end
             frame.texture:SetTexture(entry.icon)
             frame.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
+            updateCountdownThreshold(frame.cooldown)
             local applied, grey
             if entry.isItem then
                 local count = entry.count
@@ -717,7 +745,9 @@ local function updateNativeIcon(item, viewer, key)
     local override = id and not viewer:IsEditing() and (Addon.GetIconOverride(key, baseID or id) or Addon.GetIconOverride(key, id))
     local rank = override and spellsByID[override.rankID]
     local timer = spellTimers[item]
-    local nativeCooldown = key == "cooldowns" and id and not viewer:IsEditing() and item:GetCooldownFrame()
+    local cooldownFrame = key == "cooldowns" and item:GetCooldownFrame()
+    if cooldownFrame then updateCountdownThreshold(cooldownFrame) end
+    local nativeCooldown = id and not viewer:IsEditing() and cooldownFrame
     -- Fill in a missing native combat timer without replacing a countdown Blizzard is already displaying.
     local fallback = nativeCooldown and not rank and InCombatLockdown()
         and number(apiCall(nativeCooldown.GetCooldownDuration, nativeCooldown)) == 0
