@@ -257,6 +257,8 @@ local function createTrackedRow(container)
     row:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetAllPoints()
+    row.count = row:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    row.count:SetPoint("BOTTOMRIGHT", -3, 3)
     row.border = row:CreateTexture(nil, "OVERLAY")
     row.border:SetAtlas("UI-HUD-CoolDownManager-IconOverlay")
     row.border:SetPoint("TOPLEFT", -6, 5)
@@ -276,6 +278,16 @@ local function createTrackedRow(container)
         local id, section, isItem = self.entryID, self.section, self.isItem
         MenuUtil.CreateContextMenu(self, function(_, root)
             root:CreateTitle("Better CDM")
+            if isItem then
+                local appearance = root:CreateButton("Icon")
+                for _, choice in ipairs({ { "Item artwork" }, { "Engineering", "engineering" }, { "Potion", "potion" } }) do
+                    local style = choice[2]
+                    appearance:CreateRadio(choice[1], function() return Addon.GetItemIconStyle(id) == style end, function()
+                        Addon.SetItemIconStyle(id, style)
+                        refreshTrackedEntries()
+                    end)
+                end
+            end
             for _, destination in ipairs(cooldownSections) do
                 local label, target = destination[1], destination[2]
                 if target ~= section and canDropEntry(target, isItem) then
@@ -364,6 +376,8 @@ local function refreshTrackedDisplay(display, section)
         row.entryID, row.isItem, row.section = entry.id, entry.isItem, section
         row.betterCDMEntryKey = entry.key
         row.icon:SetTexture(entry.icon)
+        row.icon:SetDesaturated(entry.count == 0)
+        row.count:SetText(entry.count or "")
         local matches = (entry.name .. " " .. entry.id):lower():find(query, 1, true)
         row.icon:SetAlpha(matches and 1 or 0.3)
     end
@@ -425,6 +439,22 @@ local function attachTrackedControls(manager)
                 input:SetScript("OnEnterPressed", add)
                 local addButton = button(controls, "Add", 43, add)
                 addButton:SetPoint("LEFT", input, "RIGHT", 5, 0)
+                controls.bags = button(controls, "Bags", 45, function(owner)
+                    MenuUtil.CreateContextMenu(owner, function(_, root)
+                        root:CreateTitle("Usable bag items")
+                        root:SetScrollMode(260)
+                        local entries = Addon.GetUsableBagItems()
+                        if #entries == 0 then root:CreateTitle("No untracked usable items") end
+                        for _, entry in ipairs(entries) do
+                            local label = entry.count and ("%s (%d)"):format(entry.name, entry.count) or entry.name
+                            root:CreateButton(label, function()
+                                addTrackedEntry(entry.id, "items", categories.EquipSlotEssential)
+                                refreshTrackedEntries()
+                            end)
+                        end
+                    end)
+                end)
+                controls.bags:SetPoint("LEFT", addButton, "RIGHT", 4, 0)
                 hooksecurefunc(display, "RefreshLayout", function(self)
                     local current = trackedDisplays[self]
                     if current then refreshTrackedDisplay(self, current) end
@@ -434,7 +464,8 @@ local function attachTrackedControls(manager)
                     if current and not collapsed then refreshTrackedDisplay(self, current) end
                 end)
             end
-            controls:SetWidth(159)
+            controls:SetWidth(section == "items" and 208 or 159)
+            controls.bags:SetShown(section == "items")
             controls.hint:SetText(section == "items" and "Item name or ID" or "Spell name or ID")
             refreshTrackedDisplay(display, section)
         end
@@ -505,8 +536,10 @@ function Addon.AttachOptions()
     Menu.ModifyMenu("MENU_COOLDOWN_SETTINGS_ITEM", itemMenu)
     local itemData = CreateFrame("Frame")
     itemData:RegisterEvent("GET_ITEM_INFO_RECEIVED")
-    itemData:SetScript("OnEvent", function(_, _, _, success)
-        if success then refreshTrackedEntries() end
+    itemData:RegisterEvent("BAG_UPDATE_DELAYED")
+    itemData:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    itemData:SetScript("OnEvent", function(_, event, _, success)
+        if event ~= "GET_ITEM_INFO_RECEIVED" or success then refreshTrackedEntries() end
     end)
     if CooldownViewerSettings and CooldownViewerSettings.categoryPool then
         hooksecurefunc(CooldownViewerSettings, "ClearDisplayCategories", clearTrackedEntries)

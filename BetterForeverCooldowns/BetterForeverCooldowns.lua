@@ -5,9 +5,9 @@ local activeBuffs = {}
 local buffListComplete
 local manaGemsSpellID = 1318827
 local manaGemItemIDs = { 5514, 5513, 8007, 8008 }
-local manaGemsMissing
-local manaGemHooks = setmetatable({}, { __mode = "k" })
-local manaGemSettingsAttached
+local manaGemCount
+local itemCountHooks = setmetatable({}, { __mode = "k" })
+local itemCountSettingsAttached
 local viewerNames = {
     cooldowns = { "EssentialCooldownViewer", "UtilityCooldownViewer" },
     auras = { "BuffIconCooldownViewer" },
@@ -48,53 +48,82 @@ local function isManaGems(item)
         or number(apiCall(item.GetSpellID, item)) == manaGemsSpellID
 end
 
-local function refreshManaGemIcon(item, method)
-    if not isManaGems(item) then return end
-    if not manaGemHooks[item] then
+local function updateItemCount(frame, icon, count)
+    if not icon then return end
+    if count == 0 then icon:SetDesaturated(true) end
+    local label = frame.betterCDMItemCount
+    if not label and count ~= nil then
+        local overlay = CreateFrame("Frame", nil, frame)
+        overlay:SetAllPoints()
+        overlay:SetFrameLevel(frame:GetFrameLevel() + 8)
+        label = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+        label:SetPoint("BOTTOMRIGHT", -3, 3)
+        frame.betterCDMItemCount = label
+    end
+    if label then label:SetText(count or "") end
+end
+
+local function getItemCount(id)
+    return number(apiCall(C_Item.GetItemCount, id, false))
+end
+
+local function getNativeItemCount(item)
+    if isManaGems(item) then return manaGemCount end
+    local slot = number(apiCall(item.GetEquipSlot, item))
+    local id = slot and number(apiCall(GetInventoryItemID, "player", slot))
+        or number(apiCall(item.GetSpellCategoryTooltipItemID, item))
+    if id then return getItemCount(id) end
+    if slot then return 0 end
+end
+
+local function refreshNativeItemCount(item, method)
+    if not item[method] then return end
+    if getNativeItemCount(item) == nil and not itemCountHooks[item] then return end
+    if not itemCountHooks[item] then
         hooksecurefunc(item, method, function(self)
-            if manaGemsMissing and isManaGems(self) then
-                local icon = method == "RefreshIconState" and self.Icon or self:GetIconTexture()
-                if icon then icon:SetDesaturated(true) end
-            end
+            local icon = method == "RefreshIconState" and self.Icon or self:GetIconTexture()
+            updateItemCount(self, icon, getNativeItemCount(self))
         end)
-        manaGemHooks[item] = true
+        itemCountHooks[item] = true
     end
     item[method](item)
 end
 
-local function refreshManaGemSettings(manager)
+local function refreshItemCountSettings(manager)
     for display in manager.categoryPool:EnumerateActive() do
         for item in display.itemPool:EnumerateActive() do
-            refreshManaGemIcon(item, "RefreshIconState")
+            refreshNativeItemCount(item, "RefreshIconState")
         end
     end
 end
 
-local function refreshManaGemAvailability()
-    local missing = true
+local function refreshItemAvailability()
+    local total = 0
     for _, id in ipairs(manaGemItemIDs) do
-        if number(apiCall(C_Item.GetItemCount, id, false)) ~= 0 then
-            missing = false
+        local count = getItemCount(id)
+        if count == nil then
+            total = nil
             break
         end
+        total = total + count
     end
-    manaGemsMissing = missing
+    manaGemCount = total
 
     for _, name in ipairs(viewerNames.cooldowns) do
         local viewer = _G[name]
         if viewer and viewer.itemFramePool then
             for item in viewer.itemFramePool:EnumerateActive() do
-                refreshManaGemIcon(item, "RefreshIconDesaturation")
+                refreshNativeItemCount(item, "RefreshIconDesaturation")
             end
         end
     end
     local manager = _G.CooldownViewerSettings
     if manager and manager.categoryPool then
-        if not manaGemSettingsAttached then
-            hooksecurefunc(manager, "RefreshLayout", refreshManaGemSettings)
-            manaGemSettingsAttached = true
+        if not itemCountSettingsAttached then
+            hooksecurefunc(manager, "RefreshLayout", refreshItemCountSettings)
+            itemCountSettingsAttached = true
         end
-        if manager:IsShown() then refreshManaGemSettings(manager) end
+        if manager:IsShown() then refreshItemCountSettings(manager) end
     end
 end
 
@@ -160,6 +189,42 @@ function Addon.ResolveCooldownEntry(text, isItem)
     if readable(info) and info then return id or number(info.spellID) end
 end
 
+local itemStyles = {
+    engineering = "Interface/Icons/Trade_Engineering",
+    potion = "Interface/Icons/INV_Potion_114",
+}
+
+function Addon.GetUsableBagItems()
+    local entries, seen = {}, {}
+    for bag = 0, NUM_BAG_SLOTS do
+        for slot = 1, C_Container.GetContainerNumSlots(bag) do
+            local id = number(apiCall(C_Container.GetContainerItemID, bag, slot))
+            if id and not seen[id] then
+                seen[id] = true
+                local spell = apiCall(C_Item.GetItemSpell, id)
+                if readable(spell) and spell and not db.customCooldowns.items[id] then
+                    local name = apiCall(C_Item.GetItemNameByID, id) or ("Item " .. id)
+                    entries[#entries + 1] = { id = id, name = name, count = getItemCount(id) }
+                end
+            end
+        end
+    end
+    table.sort(entries, sortEntries)
+    return entries
+end
+
+function Addon.GetItemIconStyle(id)
+    local entry = db.customCooldowns.items[id]
+    return entry and entry.iconStyle
+end
+
+function Addon.SetItemIconStyle(id, style)
+    local entry = db.customCooldowns.items[id]
+    if not entry then return end
+    entry.iconStyle = itemStyles[style] and style or nil
+    Addon.ApplySettings()
+end
+
 function Addon.GetCustomCooldowns(section)
     local entries, order, positions = {}, {}, {}
     for _, kind in ipairs({ "spells", "items" }) do
@@ -169,12 +234,15 @@ function Addon.GetCustomCooldowns(section)
                 local name, icon
                 if isItem then
                     name = apiCall(C_Item.GetItemNameByID, id) or ("Item " .. id)
-                    icon = apiCall(C_Item.GetItemIconByID, id) or 134400
+                    icon = itemStyles[entry.iconStyle] or apiCall(C_Item.GetItemIconByID, id) or 134400
                 else
                     name, icon = spellMetadata(id)
                 end
                 local key = isItem and -id or id
-                entries[#entries + 1] = { id = id, key = key, isItem = isItem, name = name, icon = icon, order = entry.order or id }
+                entries[#entries + 1] = {
+                    id = id, key = key, isItem = isItem, name = name, icon = icon, order = entry.order or id,
+                    count = isItem and getItemCount(id) or nil,
+                }
                 positions[key] = entry.position
             end
         end
@@ -188,7 +256,9 @@ function Addon.SetCustomCooldown(id, isItem, section)
     local saved = isItem and db.customCooldowns.items or db.customCooldowns.spells
     local old = saved[id]
     if section then
-        if not old or old.section ~= section then saved[id] = { section = section } end
+        if not old or old.section ~= section then
+            saved[id] = { section = section, iconStyle = old and old.iconStyle }
+        end
     else
         saved[id] = nil
     end
@@ -464,14 +534,14 @@ local function refreshCustomCooldowns(viewer)
             frame.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
             local applied, grey
             if entry.isItem then
-                local count = number(apiCall(C_Item.GetItemCount, entry.id, false))
-                local start, duration, enabled = C_Item.GetItemCooldown(entry.id)
+                local count = entry.count
+                local ok, start, duration, enabled = pcall(C_Item.GetItemCooldown, entry.id)
                 start, duration = number(start), number(duration)
-                applied = readable(enabled) and (enabled == true or enabled == 1)
+                applied = ok and readable(enabled) and (enabled == true or enabled == 1)
                     and start and duration and start > 0 and duration > 0 and start + duration > GetTime()
                 if applied then frame.cooldown:SetCooldown(start, duration) end
                 grey = count == 0 or not not applied
-                frame.count:SetText(count and count > 1 and count or "")
+                frame.count:SetText(count or "")
             else
                 local spell = spellsByID[entry.id]
                 applied, grey = updateSpellTimer(frame, entry.id, spell and spell.slot, spell and spell.lowerRank)
@@ -721,15 +791,14 @@ local function refreshDividers(viewer)
     local frames = dividerFrames[viewer]
     if not frames and not next(selected) then return end
 
-    local items = {}
+    local ids = {}
     for item in viewer.itemFramePool:EnumerateActive() do
         local id = number(item:GetCooldownID())
-        if id and item.layoutIndex then
-            items[item.layoutIndex] = item
-        end
+        if id then ids[item] = id end
     end
 
     local container = viewer:GetItemContainerFrame()
+    local items = container:GetLayoutChildren()
     local horizontal = container.isHorizontal
     local forward = (horizontal and container.layoutFramesGoingRight) or (not horizontal and container.layoutFramesGoingUp)
     local stride = container.stride or 1
@@ -738,8 +807,13 @@ local function refreshDividers(viewer)
     frames = frames or {}
     dividerFrames[viewer] = frames
     local used = 0
-    for index, item in pairs(items) do
-        if items[index + 1] and index % stride ~= 0 and selected[number(item:GetCooldownID())] then
+    for index, item in ipairs(items) do
+        local nextItem = items[index + 1]
+        local id = ids[item]
+        local slot = id and selected[id] and number(apiCall(item.GetEquipSlot, item))
+        local emptySlot = slot and getNativeItemCount(item) == 0
+        if nextItem and index % stride ~= 0 and selected[id] and not emptySlot
+            and item:IsShown() and nextItem:IsShown() then
             used = used + 1
             local frame = frames[used]
             if not frame then
@@ -774,6 +848,7 @@ local function refreshDividers(viewer)
 
     for index = used + 1, #frames do
         frames[index]:Hide()
+        frames[index]:ClearAllPoints()
     end
 end
 
@@ -812,7 +887,7 @@ local function styleViewer(viewer, key)
             itemHooks[item] = true
         end
         updateNativeIcon(item, viewer, key)
-        if key == "cooldowns" then refreshManaGemIcon(item, "RefreshIconDesaturation") end
+        if key == "cooldowns" then refreshNativeItemCount(item, "RefreshIconDesaturation") end
     end
     if key == "cooldowns" then
         refreshCustomCooldowns(viewer)
@@ -827,7 +902,10 @@ local function updateNativeIcons(key)
             for item in viewer.itemFramePool:EnumerateActive() do
                 updateNativeIcon(item, viewer, key)
             end
-            if key == "cooldowns" then refreshCustomCooldowns(viewer) end
+            if key == "cooldowns" then
+                refreshCustomCooldowns(viewer)
+                refreshDividers(viewer)
+            end
         end
     end
 end
@@ -840,6 +918,7 @@ local function styleBlizzardViewers()
                 if not viewerHooks[viewer] then
                     local function refreshViewer(self) styleViewer(self, key) end
                     hooksecurefunc(viewer, "RefreshData", refreshViewer)
+                    if key == "cooldowns" then hooksecurefunc(viewer, "RefreshLayout", refreshDividers) end
                     hooksecurefunc(viewer, "SetTimerShown", refreshViewer)
                     hooksecurefunc(viewer, "SetIsEditing", refreshViewer)
                     viewerHooks[viewer] = true
@@ -900,7 +979,7 @@ local function refresh()
         attachBarStacks()
         Addon.AttachOptions()
     end
-    if update.blizzard or update.bags then refreshManaGemAvailability() end
+    if update.blizzard or update.bags then refreshItemAvailability() end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
 end
 
