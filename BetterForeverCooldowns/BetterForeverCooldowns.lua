@@ -6,7 +6,8 @@ local buffListComplete
 local manaGemsSpellID = 1318827
 local manaGemItemIDs = { 5514, 5513, 8007, 8008 }
 local manaGemCount
-local itemCountHooks = setmetatable({}, { __mode = "k" })
+local itemCountLabels = setmetatable({}, { __mode = "k" })
+local itemCountDesaturation = setmetatable({}, { __mode = "k" })
 local itemCountSettingsAttached
 local countdownThresholds = setmetatable({}, { __mode = "k" })
 local viewerNames = {
@@ -89,14 +90,14 @@ local function updateCountdownThreshold(cooldown)
 end
 
 local function updateItemCountLabel(frame, count)
-    local label = frame.betterCDMItemCount
+    local label = itemCountLabels[frame]
     if not label and count ~= nil then
         local overlay = CreateFrame("Frame", nil, frame)
         overlay:SetAllPoints()
         overlay:SetFrameLevel(frame:GetFrameLevel() + 8)
         label = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
         label:SetPoint("BOTTOMRIGHT", -3, 3)
-        frame.betterCDMItemCount = label
+        itemCountLabels[frame] = label
     end
     if label then label:SetText(count or "") end
 end
@@ -113,25 +114,28 @@ local function getNativeItemCount(item)
     if id then return getItemCount(id), id end
 end
 
-local function refreshNativeItemCount(item, method)
-    if not item[method] then return end
-    if getNativeItemCount(item) == nil and not itemCountHooks[item] then return end
-    if not itemCountHooks[item] then
-        hooksecurefunc(item, method, function(self)
-            local icon = method == "RefreshIconState" and self.Icon or self:GetIconTexture()
-            local count, id, slot = getNativeItemCount(self)
-            if icon and count == 0 then icon:SetDesaturated(true) end
-            updateItemCountLabel(self, visibleItemCount(count, id, slot))
-        end)
-        itemCountHooks[item] = true
+local function refreshNativeItemCount(item, icon)
+    if not icon then return end
+    local count, id, slot = getNativeItemCount(item)
+    local wasDesaturated = itemCountDesaturation[item]
+    if count == 0 then
+        local current = apiCall(icon.IsDesaturated, icon)
+        if readable(current) and type(current) == "boolean" then
+            if wasDesaturated == nil or not current then itemCountDesaturation[item] = current end
+            if not current then icon:SetDesaturated(true) end
+        end
+    elseif wasDesaturated ~= nil then
+        local current = apiCall(icon.IsDesaturated, icon)
+        if readable(current) and current == true then icon:SetDesaturated(wasDesaturated) end
+        itemCountDesaturation[item] = nil
     end
-    item[method](item)
+    updateItemCountLabel(item, visibleItemCount(count, id, slot))
 end
 
 local function refreshItemCountSettings(manager)
     for display in manager.categoryPool:EnumerateActive() do
         for item in display.itemPool:EnumerateActive() do
-            refreshNativeItemCount(item, "RefreshIconState")
+            refreshNativeItemCount(item, item.Icon)
         end
     end
 end
@@ -148,14 +152,6 @@ local function refreshItemAvailability()
     end
     manaGemCount = total
 
-    for _, name in ipairs(viewerNames.cooldowns) do
-        local viewer = _G[name]
-        if viewer and viewer.itemFramePool then
-            for item in viewer.itemFramePool:EnumerateActive() do
-                refreshNativeItemCount(item, "RefreshIconDesaturation")
-            end
-        end
-    end
     local manager = _G.CooldownViewerSettings
     if manager and manager.categoryPool then
         if not itemCountSettingsAttached then
@@ -718,7 +714,7 @@ local function migrateBuffAlternatives()
     end
 end
 
-local viewerHooks, itemHooks = {}, {}
+local viewerHooks = {}
 local spellTimers = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
@@ -819,12 +815,12 @@ local function updateNativeIcon(item, viewer, key)
         else
             show = missingForOverride(item, override.auraID or id, override)
         end
-        item:SetShown(show == true)
+        if item:IsShown() ~= (show == true) then item:SetShown(show == true) end
         filteredItems[item] = true
     elseif filteredItems[item] then
         filteredItems[item] = nil
         local shown = apiCall(item.ShouldBeShown, item)
-        if readable(shown) and type(shown) == "boolean" then item:SetShown(shown) end
+        if readable(shown) and type(shown) == "boolean" and item:IsShown() ~= shown then item:SetShown(shown) end
     end
 end
 
@@ -911,27 +907,8 @@ end
 local function styleViewer(viewer, key)
     if not viewer.itemFramePool then return end
     for item in viewer.itemFramePool:EnumerateActive() do
-        if not itemHooks[item] then
-            if item.UpdateShownState then
-                hooksecurefunc(item, "UpdateShownState", function(self)
-                    updateNativeIcon(self, viewer, key)
-                end)
-            end
-            if key == "auras" and item.RefreshData then
-                hooksecurefunc(item, "RefreshData", function(self)
-                    updateNativeIcon(self, viewer, key)
-                end)
-            end
-            local cooldown = item:GetCooldownFrame()
-            if cooldown and key == "cooldowns" then
-                cooldown:HookScript("OnCooldownDone", function()
-                    updateNativeIcon(item, viewer, key)
-                end)
-            end
-            itemHooks[item] = true
-        end
         updateNativeIcon(item, viewer, key)
-        if key == "cooldowns" then refreshNativeItemCount(item, "RefreshIconDesaturation") end
+        if key == "cooldowns" then refreshNativeItemCount(item, item:GetIconTexture()) end
     end
     if key == "cooldowns" then
         refreshCustomCooldowns(viewer)
@@ -943,13 +920,7 @@ local function updateNativeIcons(key)
     for _, name in ipairs(viewerNames[key]) do
         local viewer = _G[name]
         if viewer and viewer:IsVisible() and viewer.itemFramePool then
-            for item in viewer.itemFramePool:EnumerateActive() do
-                updateNativeIcon(item, viewer, key)
-            end
-            if key == "cooldowns" then
-                refreshCustomCooldowns(viewer)
-                refreshDividers(viewer)
-            end
+            styleViewer(viewer, key)
         end
     end
 end
@@ -960,9 +931,21 @@ local function styleBlizzardViewers()
             local viewer = _G[name]
             if viewer and viewer.itemFramePool then
                 if not viewerHooks[viewer] then
-                    local function refreshViewer(self) styleViewer(self, key) end
+                    local scheduled
+                    local function refreshViewer(self)
+                        if scheduled then return end
+                        scheduled = true
+                        -- Wait for Blizzard to finish refreshing and laying out its items.
+                        C_Timer.After(0, function()
+                            scheduled = false
+                            styleViewer(self, key)
+                        end)
+                    end
                     hooksecurefunc(viewer, "RefreshData", refreshViewer)
-                    if key == "cooldowns" then hooksecurefunc(viewer, "RefreshLayout", refreshDividers) end
+                    hooksecurefunc(viewer, "RefreshLayout", refreshViewer)
+                    if viewer.RefreshActiveFramesForTargetChange then
+                        hooksecurefunc(viewer, "RefreshActiveFramesForTargetChange", refreshViewer)
+                    end
                     hooksecurefunc(viewer, "SetTimerShown", refreshViewer)
                     hooksecurefunc(viewer, "SetIsEditing", refreshViewer)
                     viewerHooks[viewer] = true
@@ -1013,17 +996,17 @@ local function refresh()
     local update = pending
     pending = {}
     if update.catalog then scanSpellbook() end
-    if update.catalog or update.cooldowns or update.bags then updateNativeIcons("cooldowns") end
+    if update.blizzard or update.bags then refreshItemAvailability() end
+    if not update.blizzard and (update.catalog or update.cooldowns or update.bags) then updateNativeIcons("cooldowns") end
     if update.auras then
         scanAuras()
-        updateNativeIcons("auras")
+        if not update.blizzard then updateNativeIcons("auras") end
     end
     if update.blizzard then
         styleBlizzardViewers()
         attachBarStacks()
         Addon.AttachOptions()
     end
-    if update.blizzard or update.bags then refreshItemAvailability() end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
 end
 
