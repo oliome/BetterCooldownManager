@@ -1,0 +1,14 @@
+package-as: BetterForeverCooldowns
+
+move-folders:
+  BetterForeverCooldowns/BetterForeverCooldowns: BetterForeverCooldowns
+
+ignore:
+  - .github
+  - .gitignore
+  - .gitattributes
+  - README.md
+  - .tooling
+  - BetterForeverCooldowns.zip
+  - candidate.json
+  - test-results.txt

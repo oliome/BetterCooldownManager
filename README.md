@@ -4,8 +4,8 @@ Better Forever Cooldowns extends Blizzard’s Cooldown Manager in World of Warcr
 
 ## Installation
 
-1. Download the repository ZIP from GitHub using **Code → Download ZIP**.
-2. Extract it and copy the inner `BetterForeverCooldowns` folder into your WoW installation’s `_forever_/Interface/AddOns/` directory. The `BetterForeverCooldowns.toc` file should be directly inside the copied folder.
+1. Download the addon ZIP from [GitHub Releases](https://github.com/oliome/BetterCooldownManager/releases). Automatic updates are initially published as beta releases.
+2. Extract it and copy the `BetterForeverCooldowns` folder into your WoW installation’s `_forever_/Interface/AddOns/` directory. The `BetterForeverCooldowns.toc` file should be directly inside the copied folder.
 3. Enable **Better Forever Cooldowns** in WoW’s AddOns list. Enable Blizzard’s Cooldown Manager in the game settings, then open it with `/cdm` or `/bfc`.
 
 ## Spells, items, and dividers
@@ -22,3 +22,7 @@ Right-click a Blizzard entry in **Tracked Buffs**, then enable **Better CDM → 
 In combat, the addon can use Blizzard’s tracked entry to check whether the main buff is missing. If the game withholds the status of a configured alternative, the reminder stays hidden until absence can be confirmed.
 
 Better CDM’s settings are saved per character.
+
+## Automatic version updates
+
+GitHub checks for new Forever builds hourly and publishes a version bump after the automated checks pass. Install the new release ZIP to update the addon. See [build and update checks](.github/updates.md) for setup and verification details.

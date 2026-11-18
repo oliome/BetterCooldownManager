@@ -1,0 +1,14 @@
+name: Addon checks
+description: Parse the addon with Lua 5.1 and test update automation
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y lua5.1 jq
+    - shell: bash
+      run: |
+        {
+          luac5.1 -p BetterForeverCooldowns/BetterForeverCooldowns.lua
+          luac5.1 -p BetterForeverCooldowns/Options.lua
+          bash .github/tests/update.sh
+        } 2>&1 | tee test-results.txt
