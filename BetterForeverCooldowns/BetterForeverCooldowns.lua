@@ -16,10 +16,12 @@ local viewerNames = {
 }
 
 local defaults = {
+    compatibilityMode = true,
+    knownBuffs = { [18264] = true }, -- Headmaster's Charge: buff spell, not item ID 13937.
     shortCooldownDecimals = true,
     cooldowns = { overrides = {}, dividers = {} },
     auras = { overrides = {} },
-    customCooldowns = { spells = {}, items = {} },
+    customCooldowns = { spells = {}, items = {}, buffs = {} },
 }
 local function fillDefaults(values, source)
     for key, value in pairs(source) do
@@ -152,6 +154,8 @@ local function refreshItemAvailability()
     end
     manaGemCount = total
 
+    if db.compatibilityMode then return end
+
     local manager = _G.CooldownViewerSettings
     if manager and manager.categoryPool then
         if not itemCountSettingsAttached then
@@ -262,7 +266,7 @@ end
 
 function Addon.GetCustomCooldowns(section)
     local entries, order, positions = {}, {}, {}
-    for _, kind in ipairs({ "spells", "items" }) do
+    for _, kind in ipairs({ "spells", "items", "buffs" }) do
         local isItem = kind == "items"
         for id, entry in pairs(db.customCooldowns[kind]) do
             if entry.section == section then
@@ -367,6 +371,7 @@ local function scanAuras()
         local id = readable(aura) and number(aura.spellId)
         if id then
             activeBuffs[id] = true
+            db.knownBuffs[id] = true
         else
             buffListComplete = false
         end
@@ -511,8 +516,22 @@ end
 
 local customCooldownFrames = {}
 
+local function addCustomIconArtwork(frame, texture, section)
+    local mask = frame:CreateMaskTexture()
+    mask:SetAtlas("UI-HUD-CoolDownManager-Mask")
+    mask:SetAllPoints()
+    texture:AddMaskTexture(mask)
+    local border = frame:CreateTexture(nil, "OVERLAY")
+    border:SetAtlas("UI-HUD-CoolDownManager-IconOverlay")
+    local x, y = 6, 5
+    if section == "essential" then x, y = 9, 8 end
+    if section == "auras" then x, y = 8, 7 end
+    border:SetPoint("TOPLEFT", -x, y)
+    border:SetPoint("BOTTOMRIGHT", x, -y)
+end
+
 local function refreshCustomCooldowns(viewer)
-    local section = viewer == _G.EssentialCooldownViewer and "essential" or "utility"
+    local section = viewer.betterCDMSection or (viewer == _G.EssentialCooldownViewer and "essential" or "utility")
     local entries, order, positions = Addon.GetCustomCooldowns(section)
     local frames = customCooldownFrames[viewer]
     if #entries == 0 and not frames then return end
@@ -531,7 +550,7 @@ local function refreshCustomCooldowns(viewer)
     end
     local template = native[1]
     local size = section == "essential" and 50 or 30
-    local width, height = size, size
+    local width, height = viewer.betterCDMWidth or size, viewer.betterCDMHeight or size
     if template then width, height = template:GetSize(true) end
     local scale = viewer.iconScale or 1
     local used, changed = 0, false
@@ -544,10 +563,7 @@ local function refreshCustomCooldowns(viewer)
                 frame:Hide()
                 frame.texture = frame:CreateTexture(nil, "ARTWORK")
                 frame.texture:SetAllPoints()
-                local mask = frame:CreateMaskTexture()
-                mask:SetAtlas("UI-HUD-CoolDownManager-Mask")
-                mask:SetAllPoints()
-                frame.texture:AddMaskTexture(mask)
+                addCustomIconArtwork(frame, frame.texture, section)
                 frame.cooldown = CreateFrame("Cooldown", nil, frame)
                 frame.cooldown:SetAllPoints()
                 frame.cooldown:SetSwipeTexture([[Interface\HUD\UI-HUD-CoolDownManager-Icon-Swipe]], 1, 1, 1, 1)
@@ -560,6 +576,16 @@ local function refreshCustomCooldowns(viewer)
                 overlay:SetFrameLevel(frame:GetFrameLevel() + 8)
                 frame.count = overlay:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
                 frame.count:SetPoint("BOTTOMRIGHT", -2, 2)
+                frame:EnableMouse(true)
+                if frame.SetMouseClickEnabled then frame:SetMouseClickEnabled(false) end
+                frame:SetScript("OnEnter", function(self)
+                    if not self.betterCDMTooltipsShown then return end
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    if self.isItem then GameTooltip:SetItemByID(self.entryID)
+                    else GameTooltip:SetSpellByID(self.entryID) end
+                    GameTooltip:Show()
+                end)
+                frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
                 frames[used] = frame
             end
             if frame:GetWidth() ~= width or frame:GetHeight() ~= height or frame:GetScale() ~= scale then
@@ -568,6 +594,8 @@ local function refreshCustomCooldowns(viewer)
                 changed = true
             end
             frame.texture:SetTexture(entry.icon)
+            frame.entryID, frame.isItem = entry.id, entry.isItem
+            frame.betterCDMTooltipsShown = viewer.tooltipsShown ~= false
             frame.cooldown:SetHideCountdownNumbers(viewer.timerShown == false)
             updateCountdownThreshold(frame.cooldown)
             local applied, grey
@@ -600,7 +628,7 @@ local function refreshCustomCooldowns(viewer)
     if changed or positioned then container:Layout() end
 end
 
-local function isAuraMissing(id)
+local function isExactAuraMissing(id)
     local linked = number(apiCall(C_UnitAuras.GetCooldownAuraBySpellID, id))
     if activeBuffs[id] or activeBuffs[linked] then return false end
     local lookup = C_UnitAuras.GetAuraDataBySpellName
@@ -626,8 +654,39 @@ local function isAuraMissing(id)
     end
 end
 
+-- The group and single-target versions provide the same intellect buff. Match
+-- their ranks too, including additional ranks with the same localized names.
+local intellectBuffs = { 1459, 1460, 1461, 10156, 10157, 23028, 27126, 27127, 42995, 43002 }
+local function spellName(id)
+    local info = apiCall(C_Spell.GetSpellInfo, id)
+    local name = readable(info) and info and info.name
+    if readable(name) and type(name) == "string" then return name end
+end
+
+local function isIntellectBuff(id)
+    for _, spellID in ipairs(intellectBuffs) do if spellID == id then return true end end
+    local name = spellName(id)
+    return name ~= nil and (name == spellName(1459) or name == spellName(23028))
+end
+
+local function isAuraMissing(id)
+    local missing = isExactAuraMissing(id)
+    if missing == false or not isIntellectBuff(id) then return missing end
+    for activeID in pairs(activeBuffs) do
+        if isIntellectBuff(activeID) then return false end
+    end
+    for _, spellID in ipairs(intellectBuffs) do
+        if spellID ~= id then
+            local absent = isExactAuraMissing(spellID)
+            if absent == false then return false end
+            if absent == nil then missing = nil end
+        end
+    end
+    return missing
+end
+
 local function nativeBuffMissing(item)
-    if not item.GetAuraDataUnit or not item.GetAuraSpellInstanceID then return nil end
+    if not item or not item.GetAuraDataUnit or not item.GetAuraSpellInstanceID then return nil end
     local ok, unit = pcall(item.GetAuraDataUnit, item)
     local instanceOK, instance = pcall(item.GetAuraSpellInstanceID, item)
     if not ok or not instanceOK or not readable(unit) or not readable(instance) then return nil end
@@ -666,6 +725,7 @@ function Addon.SetBuffAlternative(id, auraID, alternative, enabled)
     override.alternatives = override.alternatives or {}
     override.alternatives[alternative] = enabled and true or nil
     if enabled then
+        db.knownBuffs[alternative] = true
         override.auraID = auraID
         override.visibility = "missing"
     end
@@ -673,17 +733,28 @@ function Addon.SetBuffAlternative(id, auraID, alternative, enabled)
 end
 
 function Addon.GetBuffAlternatives(id, auraID, selectedOnly)
-    local entries, seen = {}, { [id] = true, [auraID] = true }
+    local entries, seen = {}, {}
+    if id then seen[id] = true end
+    if auraID then seen[auraID] = true end
     local function add(spellID)
         if not spellID or seen[spellID] then return end
         seen[spellID] = true
         local name, icon = spellMetadata(spellID)
         entries[#entries + 1] = { id = spellID, name = name, icon = icon }
     end
-    local override = Addon.GetIconOverride("auras", id)
+    local override = id and Addon.GetIconOverride("auras", id)
     if selectedOnly then
         for spellID in pairs(override and override.alternatives or {}) do add(spellID) end
     else
+        -- Blizzard's cooldown catalog omits some long-duration buffs (such as
+        -- Brilliance). Include learned helpful spells even when not active.
+        for _, spell in ipairs(spells) do
+            local helpful = apiCall(C_Spell.IsSpellHelpful, spell.id)
+            if readable(helpful) and helpful == true then add(spell.id) end
+        end
+        for spellID in pairs(activeBuffs) do add(spellID) end
+        for spellID in pairs(db.knownBuffs) do add(spellID) end
+        for spellID in pairs(override and override.alternatives or {}) do add(spellID) end
         local manager = _G.CooldownViewerSettings
         if manager and manager.categoryPool then
             for display in manager.categoryPool:EnumerateActive() do
@@ -697,6 +768,114 @@ function Addon.GetBuffAlternatives(id, auraID, selectedOnly)
     end
     table.sort(entries, sortEntries)
     return entries
+end
+
+function Addon.AddBuffReminder(id)
+    if type(id) ~= "number" or id < 1 or id % 1 ~= 0 then return false end
+    local info = apiCall(C_Spell.GetSpellInfo, id)
+    if not readable(info) or not info then return false end
+    db.knownBuffs[id] = true
+    db.customCooldowns.buffs[id] = db.customCooldowns.buffs[id] or {}
+    db.customCooldowns.buffs[id].section = "auras"
+    Addon.SetMissingReminder(id, id, true)
+    return true
+end
+
+function Addon.RemoveBuffReminder(id)
+    db.customCooldowns.buffs[id] = nil
+    Addon.ApplySettings()
+end
+
+local customBuffFrames = {}
+local buffLayoutSettings = setmetatable({}, { __mode = "k" })
+local function layoutBuffReminders(viewer)
+    local container = viewer:GetItemContainerFrame()
+    local saved = buffLayoutSettings[container]
+    -- Blizzard's standard viewers return themselves as the item container.
+    -- Their anchors belong to Edit Mode: never clear or self-anchor them.
+    if container == viewer then
+        if viewer:IsEditing() then
+            if saved then
+                container.layoutFramesGoingRight = saved.goingRight
+                buffLayoutSettings[container] = nil
+            end
+        else
+            if not saved then
+                buffLayoutSettings[container] = { goingRight = container.layoutFramesGoingRight }
+            end
+            container.layoutFramesGoingRight = true
+        end
+        container:Layout()
+        return
+    end
+    if viewer:IsEditing() then
+        if saved then
+            container:ClearAllPoints()
+            for _, point in ipairs(saved.points) do container:SetPoint(unpack(point)) end
+            container.layoutFramesGoingRight = saved.goingRight
+            buffLayoutSettings[container] = nil
+        end
+    else
+        if not saved then
+            saved = { points = {}, goingRight = container.layoutFramesGoingRight }
+            for index = 1, container:GetNumPoints() do
+                saved.points[index] = { container:GetPoint(index) }
+            end
+            buffLayoutSettings[container] = saved
+        end
+        container:ClearAllPoints()
+        container:SetPoint("TOPLEFT", viewer, "TOPLEFT", 0, 0)
+        container.layoutFramesGoingRight = true
+    end
+    container:Layout()
+end
+
+local function refreshCustomBuffs(viewer)
+    local entries = Addon.GetCustomCooldowns("auras")
+    local container = viewer:GetItemContainerFrame()
+    local native, lastIndex = {}, 0
+    local width, height = viewer.betterCDMWidth or 40, viewer.betterCDMHeight or 40
+    for item in viewer.itemFramePool:EnumerateActive() do
+        lastIndex = math.max(lastIndex, item.layoutIndex or 0)
+        width, height = item:GetSize(true)
+        local id = number(apiCall(item.GetBaseSpellID, item))
+        if id then native[id] = true end
+        id = number(apiCall(item.GetSpellID, item))
+        if id then native[id] = true end
+    end
+    for index, entry in ipairs(entries) do
+        local frame = customBuffFrames[index]
+        if not frame then
+            frame = CreateFrame("Frame", nil, container)
+            frame.icon = frame:CreateTexture(nil, "ARTWORK")
+            frame.icon:SetAllPoints()
+            addCustomIconArtwork(frame, frame.icon, "auras")
+            frame:SetScript("OnEnter", function(self)
+                if not self.betterCDMTooltipsShown then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetSpellByID(self.spellID)
+                GameTooltip:Show()
+            end)
+            frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            frame:EnableMouse(true)
+            if frame.SetMouseClickEnabled then frame:SetMouseClickEnabled(false) end
+            customBuffFrames[index] = frame
+        end
+        frame:SetSize(width, height)
+        frame:SetScale(viewer.iconScale or 1)
+        frame.layoutIndex = lastIndex + index
+        frame.spellID = entry.id
+        frame.betterCDMTooltipsShown = viewer.tooltipsShown ~= false
+        frame.icon:SetTexture(entry.icon)
+        local override = Addon.GetIconOverride("auras", entry.id) or {}
+        local show = override.visibility == "missing" and missingForOverride(nil, entry.id, override) == true
+            or override.visibility ~= "missing" and isAuraMissing(entry.id) == false
+        frame:SetShown(not native[entry.id] and (viewer:IsEditing() or show))
+    end
+    for index = #entries + 1, #customBuffFrames do
+        customBuffFrames[index].layoutIndex = nil
+        customBuffFrames[index]:Hide()
+    end
 end
 
 local function migrateBuffAlternatives()
@@ -719,6 +898,7 @@ local spellTimers = setmetatable({}, { __mode = "k" })
 local filteredItems = setmetatable({}, { __mode = "k" })
 
 local function restoreNativeTimer(timer, item)
+    timer.cooldownOnly = nil
     timer.frame:Hide()
     if timer.nativeCooldown then
         timer.nativeCooldown:SetAlpha(timer.cooldownAlpha)
@@ -740,6 +920,7 @@ local function updateNativeIcon(item, viewer, key)
     local id = number(apiCall(item.GetSpellID, item)) or baseID
     local override = id and not viewer:IsEditing() and (Addon.GetIconOverride(key, baseID or id) or Addon.GetIconOverride(key, id))
     local rank = override and spellsByID[override.rankID]
+    local cooldownOnly = override and override.cooldownOnly == true
     local timer = spellTimers[item]
     local cooldownFrame = key == "cooldowns" and item:GetCooldownFrame()
     if cooldownFrame then updateCountdownThreshold(cooldownFrame) end
@@ -747,8 +928,8 @@ local function updateNativeIcon(item, viewer, key)
     -- Fill in a missing native combat timer without replacing a countdown Blizzard is already displaying.
     local fallback = nativeCooldown and not rank and InCombatLockdown()
         and number(apiCall(nativeCooldown.GetCooldownDuration, nativeCooldown)) == 0
-    if timer and timer.nativeCooldown and not rank then restoreNativeTimer(timer, item) end
-    if nativeCooldown and (rank or fallback) then
+    if timer and timer.nativeCooldown and not (rank or cooldownOnly) then restoreNativeTimer(timer, item) end
+    if nativeCooldown and (rank or cooldownOnly or fallback) then
         if not timer then
             local frame = CreateFrame("Frame", nil, item)
             frame:SetAllPoints(item)
@@ -768,7 +949,11 @@ local function updateNativeIcon(item, viewer, key)
             local count = countFrame:CreateFontString(nil, "OVERLAY", font)
             count:SetPoint("BOTTOMRIGHT", -2, 2)
             timer = { frame = frame, cooldown = cooldown, count = count, countFrame = countFrame }
-            cooldown:SetScript("OnCooldownDone", function() restoreNativeTimer(timer, item) end)
+            cooldown:SetScript("OnCooldownDone", function()
+                -- Keep the native aura timer suppressed when the spell is ready.
+                if timer.cooldownOnly then return end
+                restoreNativeTimer(timer, item)
+            end)
             spellTimers[item] = timer
         end
         timer.cooldown:SetHideCountdownNumbers(nativeCooldown:GetHideCountdownNumbers())
@@ -776,9 +961,15 @@ local function updateNativeIcon(item, viewer, key)
         timer.cooldown:SetCountdownAbbrevThreshold(nativeCooldown:GetCountdownAbbrevThreshold())
         timer.cooldown:SetCountdownMillisecondsThreshold(nativeCooldown:GetCountdownMillisecondsThreshold())
         timer.cooldown:SetMinimumCountdownDuration(nativeCooldown:GetMinimumCountdownDuration())
-        local applied, desaturated = updateSpellTimer(timer, rank and rank.id or id, rank and rank.slot, rank and rank.lowerRank)
-        if applied then
-            if rank and not timer.nativeCooldown then
+        timer.cooldownOnly = cooldownOnly
+        local spell = rank or (cooldownOnly and spellsByID[baseID or id])
+        local applied, desaturated = updateSpellTimer(timer, spell and spell.id or id, spell and spell.slot, spell and spell.lowerRank)
+        if applied or cooldownOnly then
+            if not applied then
+                timer.cooldown:Clear()
+                desaturated = false
+            end
+            if (rank or cooldownOnly) and not timer.nativeCooldown then
                 timer.nativeCooldown = nativeCooldown
                 timer.cooldownAlpha = nativeCooldown:GetAlpha()
                 nativeCooldown:SetAlpha(0)
@@ -789,7 +980,7 @@ local function updateNativeIcon(item, viewer, key)
                     chargeFrame:SetAlpha(0)
                 end
             end
-            timer.countFrame:SetShown(not not rank)
+            timer.countFrame:SetShown(not not (rank or cooldownOnly))
             if readable(desaturated) and type(desaturated) == "boolean" then
                 local icon = item:GetIconTexture()
                 local nativeDesaturated = apiCall(icon.IsDesaturated, icon)
@@ -816,8 +1007,14 @@ local function updateNativeIcon(item, viewer, key)
             show = missingForOverride(item, override.auraID or id, override)
         end
         if item:IsShown() ~= (show == true) then item:SetShown(show == true) end
-        filteredItems[item] = true
+        if not filteredItems[item] then
+            filteredItems[item] = { includeHidden = item.includeAsLayoutChildWhenHidden }
+        end
+        -- Compact missing-buff reminders only. Cooldown rows retain their
+        -- native footprint while ready-only icons are temporarily hidden.
+        if key == "auras" then item.includeAsLayoutChildWhenHidden = false end
     elseif filteredItems[item] then
+        item.includeAsLayoutChildWhenHidden = filteredItems[item].includeHidden
         filteredItems[item] = nil
         local shown = apiCall(item.ShouldBeShown, item)
         if readable(shown) and type(shown) == "boolean" and item:IsShown() ~= shown then item:SetShown(shown) end
@@ -898,6 +1095,7 @@ end
 
 function Addon.SetDivider(id, enabled)
     db.cooldowns.dividers[id] = enabled and true or nil
+    if db.compatibilityMode then return end
     for _, name in ipairs(viewerNames.cooldowns) do
         local viewer = _G[name]
         if viewer and viewer.itemFramePool then refreshDividers(viewer) end
@@ -913,10 +1111,130 @@ local function styleViewer(viewer, key)
     if key == "cooldowns" then
         refreshCustomCooldowns(viewer)
         refreshDividers(viewer)
+    elseif key == "auras" then
+        refreshCustomBuffs(viewer)
+        layoutBuffReminders(viewer)
+    end
+end
+
+-- Keep custom HUD widgets on addon-owned layout frames. In compatibility mode
+-- we never hook, resize, lay out, hide, or change a Blizzard HUD icon/timer.
+local standaloneViewers = {}
+local standaloneVisibilityDriver
+
+local function nativeAppendItems(native)
+    local items = {}
+    for _, child in ipairs({ native:GetChildren() }) do
+        local index = number(child.layoutIndex)
+        if index and number(child.cooldownID)
+            and (child:IsShown() or child.includeAsLayoutChildWhenHidden == true) then
+            items[#items + 1] = child
+        end
+    end
+    table.sort(items, function(a, b) return a.layoutIndex < b.layoutIndex end)
+    return items
+end
+
+local function layoutAppendedIcons(container, native, section)
+    local items = nativeAppendItems(native)
+    local last = items[#items]
+    local width = section == "essential" and 50 or section == "auras" and 40 or 30
+    local height = width
+    if last then
+        local w, h = last:GetSize(true)
+        width, height = number(w) or width, number(h) or height
+    end
+    local scale = math.max(0.01, number(native.iconScale) or 1)
+    local padding = (number(native.iconPadding) or 8) - 4
+    local stride = math.max(1, math.floor(number(native.iconLimit) or number(native.stride) or 8))
+    local horizontal = native.isHorizontal ~= false
+    local xDirection = native.layoutFramesGoingRight == false and -1 or 1
+    local yDirection = native.layoutFramesGoingUp == true and 1 or -1
+    local nativeScale = number(native:GetEffectiveScale()) or 1
+    local parentScale = number(UIParent:GetEffectiveScale()) or 1
+    container:SetScale(nativeScale / parentScale)
+    local function position(slot)
+        local column, row = slot % stride, math.floor(slot / stride)
+        if not horizontal then column, row = row, column end
+        return column * (width * scale + padding) * xDirection,
+            row * (height * scale + padding) * yDirection
+    end
+    local startSlot = last and math.floor(last.layoutIndex) or 0
+    local baseX, baseY = position(last and startSlot - 1 or 0)
+    local custom = {}
+    for _, child in ipairs({ container:GetChildren() }) do
+        if child.layoutIndex and child:IsShown() then custom[#custom + 1] = child end
+    end
+    table.sort(custom, function(a, b) return a.layoutIndex < b.layoutIndex end)
+    for index, child in ipairs(custom) do
+        local x, y = position(startSlot + index - 1)
+        child:SetSize(width, height)
+        child:SetScale(scale)
+        child:ClearAllPoints()
+        child:SetPoint("TOPLEFT", last or native, "TOPLEFT", (x - baseX) / scale, (y - baseY) / scale)
+    end
+end
+
+local function refreshStandaloneViewer(native, section)
+    local viewer = standaloneViewers[section]
+    if not viewer then
+        local container = CreateFrame("Frame", nil, UIParent)
+        container.betterCDMAppend = true
+        container:SetSize(1, 1)
+        -- This is our frame, not a replacement method on Blizzard's viewer.
+        container.Layout = function() layoutAppendedIcons(container, native, section) end
+        viewer = {
+            native = native,
+            betterCDMSection = section,
+            itemFramePool = { EnumerateActive = function() return function() end end },
+            GetItemContainerFrame = function() return container end,
+            IsEditing = function() return native:IsEditing() end,
+        }
+        standaloneViewers[section] = viewer
+        container:SetPoint("TOPLEFT", native, "TOPLEFT", 0, 0)
+        if not standaloneVisibilityDriver then
+            standaloneVisibilityDriver = CreateFrame("Frame")
+            local elapsed = 0
+            standaloneVisibilityDriver:SetScript("OnUpdate", function(_, seconds)
+                elapsed = elapsed + seconds
+                if elapsed < 0.2 then return end
+                elapsed = 0
+                for _, standalone in pairs(standaloneViewers) do
+                    local frame = standalone:GetItemContainerFrame()
+                    local shown = standalone.native:IsVisible()
+                    if frame:IsShown() ~= shown then frame:SetShown(shown) end
+                    if shown then frame:Layout() end
+                end
+            end)
+        end
+    end
+    local container = viewer:GetItemContainerFrame()
+    local items = nativeAppendItems(native)
+    if items[1] then viewer.betterCDMWidth, viewer.betterCDMHeight = items[1]:GetSize(true) end
+    viewer.iconScale, viewer.timerShown, viewer.tooltipsShown = native.iconScale, native.timerShown, native.tooltipsShown
+    container:SetShown(native:IsVisible())
+    if section == "auras" then
+        refreshCustomBuffs(viewer)
+        container:Layout()
+    else
+        refreshCustomCooldowns(viewer)
+        container:Layout()
     end
 end
 
 local function updateNativeIcons(key)
+    if db.compatibilityMode then
+        if key == "auras" then
+            local native = _G.BuffIconCooldownViewer
+            if native then refreshStandaloneViewer(native, "auras") end
+        else
+            for _, section in ipairs({ "essential", "utility" }) do
+                local native = _G[section == "essential" and "EssentialCooldownViewer" or "UtilityCooldownViewer"]
+                if native then refreshStandaloneViewer(native, section) end
+            end
+        end
+        return
+    end
     for _, name in ipairs(viewerNames[key]) do
         local viewer = _G[name]
         if viewer and viewer:IsVisible() and viewer.itemFramePool then
@@ -926,6 +1244,11 @@ local function updateNativeIcons(key)
 end
 
 local function styleBlizzardViewers()
+    if db.compatibilityMode then
+        updateNativeIcons("cooldowns")
+        updateNativeIcons("auras")
+        return
+    end
     for key, names in pairs(viewerNames) do
         for _, name in ipairs(names) do
             local viewer = _G[name]
@@ -956,32 +1279,13 @@ local function styleBlizzardViewers()
     end
 end
 
-local function updateBarStacks()
-    local viewer = _G.BuffBarCooldownViewer
-    if not viewer or not viewer.itemFramePool then return end
-    for item in viewer.itemFramePool:EnumerateActive() do
-        local label = item:GetApplicationsFontString()
-        if label then
-            label:ClearAllPoints()
-            label:SetPoint("BOTTOMRIGHT", item:GetIconFrame(), "BOTTOMRIGHT", -2, 2)
-            label:Show()
-        end
-    end
-end
-
-local function attachBarStacks()
-    local viewer = _G.BuffBarCooldownViewer
-    if viewer and not viewerHooks[viewer] then
-        hooksecurefunc(viewer, "RefreshData", updateBarStacks)
-        viewerHooks[viewer] = true
-    end
-    updateBarStacks()
-end
-
 function Addon.ApplySettings()
     styleBlizzardViewers()
-    attachBarStacks()
     Addon.UpdateChoices()
+end
+
+function Addon.IsCompatibilityMode()
+    return db.compatibilityMode
 end
 
 local catalogEvents = {
@@ -1004,7 +1308,6 @@ local function refresh()
     end
     if update.blizzard then
         styleBlizzardViewers()
-        attachBarStacks()
         Addon.AttachOptions()
     end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
@@ -1022,6 +1325,7 @@ driver:RegisterEvent("SPELL_UPDATE_CHARGES")
 driver:RegisterEvent("PLAYER_REGEN_DISABLED")
 driver:RegisterEvent("PLAYER_REGEN_ENABLED")
 driver:RegisterUnitEvent("UNIT_AURA", "player")
+driver:RegisterEvent("SPELL_DATA_LOAD_RESULT")
 driver:SetScript("OnEvent", function(_, event, name)
     if event == "ADDON_LOADED" and name == addonName then
         if type(BetterForeverCooldownsDB) ~= "table" then BetterForeverCooldownsDB = {} end
@@ -1031,9 +1335,10 @@ driver:SetScript("OnEvent", function(_, event, name)
         db.cooldowns = { overrides = db.cooldowns.overrides, dividers = db.cooldowns.dividers }
         db.auras = { overrides = db.auras.overrides }
         for id, override in pairs(db.cooldowns.overrides) do
-            if type(override) == "table" and (override.rankID or override.visibility == "ready") then
+            if type(override) == "table" and (override.rankID or override.cooldownOnly == true or override.visibility == "ready") then
                 db.cooldowns.overrides[id] = {
                     rankID = override.rankID,
+                    cooldownOnly = override.cooldownOnly == true or nil,
                     visibility = override.visibility == "ready" and "ready" or nil,
                 }
             else
@@ -1051,6 +1356,7 @@ driver:SetScript("OnEvent", function(_, event, name)
                 db.auras.overrides[id] = nil
             end
         end
+        if C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(18264) end
         return
     end
     if not db then return end
@@ -1064,6 +1370,9 @@ driver:SetScript("OnEvent", function(_, event, name)
     elseif event == "BAG_UPDATE_DELAYED" or event == "BAG_UPDATE_COOLDOWN" or event == "PLAYER_EQUIPMENT_CHANGED" then
         pending.bags = true
     elseif event == "UNIT_AURA" then
+        pending.auras = true
+    elseif event == "SPELL_DATA_LOAD_RESULT" then
+        if not db.knownBuffs[name] then return end
         pending.auras = true
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         pending.cooldowns, pending.auras = true, true
@@ -1080,4 +1389,12 @@ end)
 
 SLASH_BETTERFOREVERCOOLDOWNS1 = "/bfc"
 SLASH_BETTERFOREVERCOOLDOWNS2 = "/betterforevercooldowns"
-SlashCmdList.BETTERFOREVERCOOLDOWNS = function() Addon.ShowOptions() end
+SlashCmdList.BETTERFOREVERCOOLDOWNS = function(message)
+    local mode = type(message) == "string" and message:lower():match("^%s*(.-)%s*$")
+    if mode == "safe" or mode == "advanced" then
+        db.compatibilityMode = mode == "safe"
+        ReloadUI()
+        return
+    end
+    Addon.ShowOptions()
+end

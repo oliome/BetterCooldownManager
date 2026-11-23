@@ -56,7 +56,7 @@ function Addon.UpdateChoices()
             row.mark:SetText(selected[entry.id] and "✓" or "")
         end
     end
-    picker.empty:SetText(not picker.selectedOnly and "No matching buffs in Not Displayed" or "No matching entries")
+    picker.empty:SetText("No matching entries")
     picker.empty:SetShown(#matches == 0)
     picker.pageText:SetText(("%d / %d"):format(picker.page, pages))
     picker.previous:SetEnabled(picker.page > 1)
@@ -66,7 +66,7 @@ end
 local function makePicker(manager)
     picker = CreateFrame("Frame", "BetterForeverCooldownsPicker", manager, "BasicFrameTemplateWithInset")
     picker:SetPoint("CENTER")
-    picker:SetSize(347, 371)
+    picker:SetSize(347, 405)
     picker:SetFrameLevel(manager:GetFrameLevel() + 50)
     picker:EnableMouse(true)
     picker:EnableMouseWheel(true)
@@ -91,7 +91,7 @@ local function makePicker(manager)
     picker.mode = button(picker, "Selected", 90, function(self)
         picker.selectedOnly = not picker.selectedOnly
         picker.page = 1
-        self:SetText(picker.selectedOnly and "Not Displayed" or "Selected")
+        self:SetText(picker.selectedOnly and "All" or "Selected")
         Addon.UpdateChoices()
     end)
     picker.mode:SetPoint("TOPRIGHT", -14, -32)
@@ -144,6 +144,29 @@ local function makePicker(manager)
     picker.next:SetPoint("LEFT", picker.previous, "RIGHT", 67, 0)
     picker.pageText = picker:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     picker.pageText:SetPoint("LEFT", picker.previous, "RIGHT", 16, 0)
+    local input = CreateFrame("EditBox", nil, picker, "InputBoxTemplate")
+    input:SetAutoFocus(false)
+    input:SetSize(215, 22)
+    input:SetPoint("TOPLEFT", 18, -329)
+    local placeholder = input:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    placeholder:SetPoint("LEFT", 5, 0)
+    placeholder:SetText("Buff name or spell ID")
+    input:SetScript("OnTextChanged", function(self) placeholder:SetShown(self:GetText() == "") end)
+    local function addAlternative()
+        local id = Addon.ResolveCooldownEntry(input:GetText(), false)
+        if not id or not C_Spell.GetSpellInfo(id) then
+            UIErrorsFrame:AddMessage("Could not find that buff. Try its spell ID.", 1, 0.3, 0.3)
+            return
+        end
+        Addon.SetBuffAlternative(picker.reminderID, picker.auraID, id, true)
+        input:SetText("")
+        input:ClearFocus()
+    end
+    input:SetScript("OnEnterPressed", addAlternative)
+    input:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    local addButton = button(picker, "Add", 70, addAlternative)
+    addButton:SetPoint("LEFT", input, "RIGHT", 12, 0)
+    picker.input = input
     local hint = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     hint:SetPoint("BOTTOMLEFT", 16, 12)
     picker.hint = hint
@@ -156,8 +179,9 @@ openPicker = function(reminderID, auraID)
     picker.selectedOnly, picker.page = false, 1
     picker.mode:SetText("Selected")
     picker.TitleText:SetText("Alternative buffs")
-    picker.hint:SetText("Pick a buff from Not Displayed to suppress this reminder.")
+    picker.hint:SetText("Pick an alternative buff to suppress this reminder.")
     picker.search:SetText("")
+    picker.input:SetText("")
     picker:Show()
     Addon.UpdateChoices()
 end
@@ -230,9 +254,14 @@ local function addTrackedEntry(id, section, target)
     local manager = CooldownViewerSettings
     local categories = Enum.CooldownViewerCategory
     local provider = manager:GetDataProvider()
+    if section == "auras" then return Addon.AddBuffReminder(id) end
     if section == "items" then
         if C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(id) end
         Addon.SetCustomCooldown(id, true, section)
+        return true
+    end
+    if Addon.IsCompatibilityMode() then
+        Addon.SetCustomCooldown(id, false, section)
         return true
     end
     local sources = { target, categories.HiddenActive, target == categories.Essential and categories.Utility or categories.Essential }
@@ -276,7 +305,8 @@ local function createTrackedRow(container)
         else
             GameTooltip:SetSpellByID(self.entryID)
         end
-        GameTooltip:AddLine("Drag to reorder or move to another section. Right-click for options.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine(self.section == "auras" and "Right-click for reminder options."
+            or "Drag to reorder or move to another section. Right-click for options.", 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -284,6 +314,14 @@ local function createTrackedRow(container)
         local id, section, isItem = self.entryID, self.section, self.isItem
         MenuUtil.CreateContextMenu(self, function(_, root)
             root:CreateTitle("Better CDM")
+            if section == "auras" then
+                missingToggle(root, id, id)
+                root:CreateButton("Remove", function()
+                    Addon.RemoveBuffReminder(id)
+                    refreshTrackedEntries()
+                end)
+                return
+            end
             addShortCooldownOption(root)
             if isItem then
                 local appearance = root:CreateButton("Icon")
@@ -311,6 +349,7 @@ local function createTrackedRow(container)
         end)
     end)
     row:SetScript("OnDragStart", function(self)
+        if self.section == "auras" then return end
         if CooldownViewerSettings:GetReorderSourceItem() then return end
         GameTooltip:Hide()
         showDragPreview(self)
@@ -407,6 +446,7 @@ local function attachTrackedControls(manager)
     local sections = {
         [categories.Essential] = "essential",
         [categories.Utility] = "utility", [categories.EquipSlotEssential] = "items",
+        [categories.TrackedBuff] = "auras",
     }
     for display in manager.categoryPool:EnumerateActive() do
         local category = display:GetCategoryObject():GetCategory()
@@ -448,6 +488,19 @@ local function attachTrackedControls(manager)
                 addButton:SetPoint("LEFT", input, "RIGHT", 5, 0)
                 controls.bags = button(controls, "Bags", 45, function(owner)
                     MenuUtil.CreateContextMenu(owner, function(_, root)
+                        if trackedDisplays[display] == "auras" then
+                            root:CreateTitle("Helpful buffs")
+                            root:SetScrollMode(260)
+                            local entries = Addon.GetBuffAlternatives()
+                            if #entries == 0 then root:CreateTitle("Apply a buff once, or enter its spell ID") end
+                            for _, entry in ipairs(entries) do
+                                root:CreateButton(entry.name, function()
+                                    Addon.AddBuffReminder(entry.id)
+                                    refreshTrackedEntries()
+                                end)
+                            end
+                            return
+                        end
                         root:CreateTitle("Usable bag items")
                         root:SetScrollMode(260)
                         local entries = Addon.GetUsableBagItems()
@@ -471,9 +524,11 @@ local function attachTrackedControls(manager)
                     if current and not collapsed then refreshTrackedDisplay(self, current) end
                 end)
             end
-            controls:SetWidth(section == "items" and 208 or 159)
-            controls.bags:SetShown(section == "items")
-            controls.hint:SetText(section == "items" and "Item name or ID" or "Spell name or ID")
+            controls:SetWidth((section == "items" or section == "auras") and 208 or 159)
+            controls.bags:SetShown(section == "items" or section == "auras")
+            controls.bags:SetText(section == "auras" and "Buffs" or "Bags")
+            controls.hint:SetText(section == "items" and "Item name or ID"
+                or section == "auras" and "Buff name or ID" or "Spell name or ID")
             refreshTrackedDisplay(display, section)
         end
         if controls then controls:SetShown(section ~= nil) end
@@ -506,6 +561,10 @@ local function itemMenu(owner, root)
     root:CreateTitle("Better CDM")
     if displayed or equipment then addShortCooldownOption(root) end
     if equipment then return end
+    if Addon.IsCompatibilityMode() then
+        root:CreateTitle("Native icon overrides disabled in compatibility mode")
+        return
+    end
     if canSetDivider then
         local label = hasDivider and "Remove divider after this ability" or "Add divider after this ability"
         root:CreateButton(label, function() Addon.SetDivider(cooldownID, not hasDivider) end)
@@ -519,6 +578,9 @@ local function itemMenu(owner, root)
         Addon.SetIconOverride(section, id, key, value)
     end
     if spell then
+        root:CreateCheckbox("Show cooldown only", function() return current("cooldownOnly") == true end, function()
+            set("cooldownOnly", current("cooldownOnly") ~= true and true or nil)
+        end)
         local ranks = Addon.GetRanks(id, displayID)
         if #ranks > 1 then
             local rank = root:CreateButton("Rank")
@@ -548,6 +610,7 @@ function Addon.AttachOptions()
     itemData:RegisterEvent("GET_ITEM_INFO_RECEIVED")
     itemData:RegisterEvent("BAG_UPDATE_DELAYED")
     itemData:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    itemData:RegisterEvent("SPELL_DATA_LOAD_RESULT")
     itemData:SetScript("OnEvent", function(_, event, _, success)
         if event ~= "GET_ITEM_INFO_RECEIVED" or success then refreshTrackedEntries() end
     end)

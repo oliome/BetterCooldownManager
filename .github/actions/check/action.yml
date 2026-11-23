@@ -1,5 +1,5 @@
 name: Addon checks
-description: Parse the addon with Lua 5.1 and test update automation
+description: Check Lua 5.1 syntax, buff alternatives, and update automation
 runs:
   using: composite
   steps:
@@ -10,5 +10,8 @@ runs:
         {
           luac5.1 -p BetterForeverCooldowns/BetterForeverCooldowns.lua
           luac5.1 -p BetterForeverCooldowns/Options.lua
+          lua5.1 .github/tests/buff-alternatives.lua
+          lua5.1 .github/tests/cooldown-only.lua
+          lua5.1 .github/tests/compatibility.lua
           bash .github/tests/update.sh
         } 2>&1 | tee test-results.txt
