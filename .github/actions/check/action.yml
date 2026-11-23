@@ -13,5 +13,6 @@ runs:
           lua5.1 .github/tests/buff-alternatives.lua
           lua5.1 .github/tests/cooldown-only.lua
           lua5.1 .github/tests/compatibility.lua
+          lua5.1 .github/tests/startup.lua
           bash .github/tests/update.sh
         } 2>&1 | tee test-results.txt

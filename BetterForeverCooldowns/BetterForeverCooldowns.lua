@@ -1279,9 +1279,22 @@ local function styleBlizzardViewers()
     end
 end
 
+local warnedMissingOptions
+local function attachOptions()
+    if type(Addon.AttachOptions) == "function" then
+        Addon.AttachOptions()
+        return true
+    end
+    if not warnedMissingOptions then
+        warnedMissingOptions = true
+        print("Better Forever Cooldowns: Options.lua did not load. Reinstall the complete BetterForeverCooldowns folder (both Lua files and the TOC), then reload. Check for an earlier Options.lua error.")
+    end
+    return false
+end
+
 function Addon.ApplySettings()
     styleBlizzardViewers()
-    Addon.UpdateChoices()
+    if type(Addon.UpdateChoices) == "function" then Addon.UpdateChoices() end
 end
 
 function Addon.IsCompatibilityMode()
@@ -1308,7 +1321,7 @@ local function refresh()
     end
     if update.blizzard then
         styleBlizzardViewers()
-        Addon.AttachOptions()
+        attachOptions()
     end
     if (update.catalog or update.auras) and Addon.UpdateChoices then Addon.UpdateChoices() end
 end
@@ -1396,5 +1409,11 @@ SlashCmdList.BETTERFOREVERCOOLDOWNS = function(message)
         ReloadUI()
         return
     end
-    Addon.ShowOptions()
+    if type(Addon.ShowOptions) == "function" then
+        Addon.ShowOptions()
+    else
+        attachOptions()
+        local manager = _G.CooldownViewerSettings
+        if manager and type(manager.ShowUIPanel) == "function" then manager:ShowUIPanel() end
+    end
 end

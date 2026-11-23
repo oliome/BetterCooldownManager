@@ -16,6 +16,8 @@ Native-icon overrides (rank pins, ready-only filtering, cooldown-only overlays, 
 2. Extract it and copy the `BetterForeverCooldowns` folder into your WoW installation’s `_forever_/Interface/AddOns/` directory. The `BetterForeverCooldowns.toc` file should be directly inside the copied folder.
 3. Enable **Better Forever Cooldowns** in WoW’s AddOns list. Enable Blizzard’s Cooldown Manager in the game settings, then open it with `/cdm` or `/bfc`.
 
+If startup reports that `Options.lua` did not load, reinstall the complete addon folder: it must contain `BetterForeverCooldowns.lua`, `Options.lua`, and `BetterForeverCooldowns.toc` together. Check for an earlier error in `Options.lua` if all three files are present.
+
 ## Spells, items, and dividers
 
 - **Essential and Utility Cooldowns.** Enter a spell name or ID and click **Add**. Compatibility mode appends a custom cooldown icon to the row. Advanced mode moves a matching Blizzard entry into the chosen section when available; other spells appear as custom icons.
